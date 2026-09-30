@@ -382,9 +382,14 @@ jump_pod:
     requests:
       cpu: 500m
       memory: "1Gi"
+      ephemeral-storage: "2Gi"
     limits:
       cpu: 1000m
       memory: "2Gi"
+      ephemeral-storage: "10Gi"
+  # Scratch /outputs emptyDir size cap (counts toward ephemeral-storage). Durable
+  # submission state lives on the NFS PVC at /mnt/openstudio, not here.
+  outputsSizeLimit: "8Gi"
   # Keep container alive for repeated kubectl exec submissions
   command: ["/bin/sh", "-c", "sleep infinity"]
   # Pin the jump pod to the same node as the web pod. Use this when pod-to-pod
