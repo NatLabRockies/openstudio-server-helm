@@ -1,28 +1,72 @@
 #!/usr/bin/env python3
+"""Log Docker into a Pulp container registry using a Keycloak device-flow token.
+
+Requires the `requests` package (pip install requests) and the docker CLI.
+
+Example:
+  scripts/pulp_login.py \\
+    --registry pulp.example.org \\
+    --keycloak-url https://sso.example.org/realms/myrealm \\
+    --client-id pulp-client
+
+Every option can also be set via an environment variable (PULP_REGISTRY,
+PULP_KEYCLOAK_URL, PULP_args.client_id, PULP_args.token_url, PULP_args.device_url,
+PULP_USERNAME).
+"""
+import argparse
+import os
 import requests
 import sys
 import time
 import subprocess
 import webbrowser
 
-# --- CONFIGURATION ---
-CLIENT_ID = "pulp-dev"
-TOKEN_URL = "https://sso.hpc.nlr.gov/realms/nlrcsc/protocol/openid-connect/token"
-DEVICE_URL = "https://sso.hpc.nlr.gov/realms/nlrcsc/protocol/openid-connect/auth/device"
-TARGET_HOST = "pulp-dev.hpc.nlr.gov"
-# ---------------------
 
-def device_login():
+def parse_args():
+    env = os.environ.get
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--registry", default=env("PULP_REGISTRY"),
+                   help="Registry host to docker login to (env: PULP_REGISTRY)")
+    p.add_argument("--client-id", default=env("PULP_args.client_id"),
+                   help="Keycloak client id (env: PULP_args.client_id)")
+    p.add_argument("--keycloak-url", default=env("PULP_KEYCLOAK_URL"),
+                   help="Keycloak realm URL, e.g. https://sso.example.org/realms/myrealm; "
+                        "token and device endpoints are derived from it (env: PULP_KEYCLOAK_URL)")
+    p.add_argument("--token-url", default=env("PULP_args.token_url"),
+                   help="Override the token endpoint (env: PULP_args.token_url)")
+    p.add_argument("--device-url", default=env("PULP_args.device_url"),
+                   help="Override the device authorization endpoint (env: PULP_args.device_url)")
+    p.add_argument("--username", default=env("PULP_USERNAME"),
+                   help="Registry username; prompted if omitted (env: PULP_USERNAME)")
+    args = p.parse_args()
+
+    if args.keycloak_url:
+        base = args.keycloak_url.rstrip("/") + "/protocol/openid-connect"
+        args.token_url = args.token_url or base + "/token"
+        args.device_url = args.device_url or base + "/auth/device"
+
+    missing = [name for name, val in (
+        ("--registry", args.registry),
+        ("--client-id", args.client_id),
+        ("--token-url (or --keycloak-url)", args.token_url),
+        ("--device-url (or --keycloak-url)", args.device_url),
+    ) if not val]
+    if missing:
+        p.error("missing required option(s): " + ", ".join(missing))
+    return args
+
+
+def device_login(args):
     """
     Performs the OAuth 2.0 Device Authorization Grant flow.
     """
     try:
         # 1. Request Device Authorization Code
-        print(f"[*] Initializing login for client: {CLIENT_ID}", file=sys.stderr)
+        print(f"[*] Initializing login for client: {args.client_id}", file=sys.stderr)
         resp = requests.post(
-            DEVICE_URL,
+            args.device_url,
             data={
-                "client_id": CLIENT_ID,
+                "client_id": args.client_id,
                 "scope": "openid profile email",
             },
             timeout=10
@@ -54,11 +98,11 @@ def device_login():
             time.sleep(5)
 
             token_resp = requests.post(
-                TOKEN_URL,
+                args.token_url,
                 data={
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     "device_code": device_code,
-                    "client_id": CLIENT_ID,
+                    "client_id": args.client_id,
                 },
                 timeout=10
             )
@@ -90,33 +134,34 @@ def device_login():
         sys.exit(1)
 
 def main():
+    args = parse_args()
     # 1. Prompt for username
-    username = input("Enter your username for {}: ".format(TARGET_HOST)).strip()
+    username = (args.username or input("Enter your username for {}: ".format(args.registry))).strip()
     if not username:
         print("[-] Username cannot be empty.", file=sys.stderr)
         sys.exit(1)
 
     # 2. Run the device flow to get the token
-    token = device_login()
+    token = device_login(args)
 
     if not token:
         print("[-] Failed to retrieve token.", file=sys.stderr)
         sys.exit(1)
 
     # 3. Use the token to log into docker via stdin
-    print(f"[*] Logging into {TARGET_HOST} as user '{username}'...", file=sys.stderr)
+    print(f"[*] Logging into {args.registry} as user '{username}'...", file=sys.stderr)
 
     try:
         # We use subprocess.run with input=token to mimic: echo $TOKEN | docker login ... -p -
         result = subprocess.run(
-            ["docker", "login", TARGET_HOST, "-u", username, "--password-stdin"],
+            ["docker", "login", args.registry, "-u", username, "--password-stdin"],
             input=token,
             capture_output=True,
             text=True
         )
 
         if result.returncode == 0:
-            print(f"[+] SUCCESS: Logged into {TARGET_HOST}")
+            print(f"[+] SUCCESS: Logged into {args.registry}")
         else:
             print(f"[-] ERROR: Docker login failed:\n{result.stderr}", file=sys.stderr)
             sys.exit(1)
