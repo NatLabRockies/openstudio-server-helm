@@ -8,7 +8,7 @@
 # What this does:
 #   1. Packs a minimal copy of the gem project (skips vendored .bundle gems,
 #      old outputs/, spec/integration, tmp, sweep_results, SR1, notebook)
-#   2. Copies it into the jump pod under /outputs/bem-to-surrogate
+#   2. Copies it into the jump pod under /mnt/openstudio/bem-to-surrogate (PVC)
 #   3. Rewrites the *copy's* configs.yml to use the in-cluster server URL
 #      and the openstudio_meta CLI already baked into the pod image
 #   4. Installs any missing gem deps (image ships most of them already),
@@ -24,6 +24,7 @@
 #
 # Env overrides: NAMESPACE, JUMP_POD_LABEL, IN_CLUSTER_SERVER_URI,
 #                OS_META_PATH, REMOTE_ROOT, SKIP_COPY, SKIP_BUNDLE,
+#                CHECK_ONLY (1 = just report expected vs created batches),
 #                RELOCK_ON_FAILURE (1 = last-resort full lockfile re-resolve)
 
 set -euo pipefail
@@ -43,7 +44,11 @@ IN_CLUSTER_SERVER_URI="${IN_CLUSTER_SERVER_URI:-http://web}"
 OS_META_PATH="${OS_META_PATH:-/opt/openstudio/bin/openstudio_meta}"
 # openstudio_meta forces this GEM_HOME internally; its gems must live here.
 META_GEM_HOME="${META_GEM_HOME:-/opt/openstudio/gems}"
-REMOTE_ROOT="${REMOTE_ROOT:-/outputs/bem-to-surrogate}"
+# Default to the NFS PVC (/mnt/openstudio) so the staged repo, log, PID lock and
+# submit manifest survive pod eviction/recreation (/outputs is an emptyDir).
+REMOTE_ROOT="${REMOTE_ROOT:-/mnt/openstudio/bem-to-surrogate}"
+STATE_DIR="${REMOTE_ROOT}.state"   # survives the re-stage wipe of REMOTE_ROOT
+CHECK_ONLY="${CHECK_ONLY:-0}"      # 1 = only compare expected vs created batches
 CHUNK_SIZE="${CHUNK_SIZE:-100m}"   # split size for the resilient copy
 MAX_RETRIES="${MAX_RETRIES:-6}"    # retries per chunk/command before giving up
 SKIP_COPY="${SKIP_COPY:-0}"        # 1 = reuse project already staged in the pod
@@ -208,6 +213,14 @@ else
 
 REMOTE_TMP="/tmp/bem_to_surrogate_chunks"
 echo "=== Preparing remote directories ==="
+# Keep the submit manifest and already-submitted batch files across a re-stage
+# so a rerun after eviction resumes instead of starting from zero.
+retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "
+mkdir -p '${STATE_DIR}'
+P='${REMOTE_ROOT}/outputs/${PROJECT_NAME}'
+[ -f \"\$P/osa_submit_manifest.jsonl\" ] && cp -f \"\$P/osa_submit_manifest.jsonl\" '${STATE_DIR}/' || true
+[ -d \"\$P/submitted\" ] && rm -rf '${STATE_DIR}/submitted' && cp -a \"\$P/submitted\" '${STATE_DIR}/submitted' || true
+"
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT" "$REMOTE_TMP"
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- mkdir -p "$REMOTE_ROOT" "$REMOTE_TMP"
 
@@ -252,6 +265,16 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$PROJ_TARBALL" -C "$GEM_DIR" \
 copy_tarball_to_pod "$PROJ_TARBALL" proj
 
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_TMP"
+# Restore saved state into the fresh stage.
+retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "
+P='${REMOTE_ROOT}/outputs/${PROJECT_NAME}'
+mkdir -p \"\$P\"
+[ -f '${STATE_DIR}/osa_submit_manifest.jsonl' ] && cp -f '${STATE_DIR}/osa_submit_manifest.jsonl' \"\$P/\" || true
+if [ -d '${STATE_DIR}/submitted' ]; then
+  mkdir -p \"\$P/submitted\"
+  for f in '${STATE_DIR}'/submitted/*; do [ -e \"\$f\" ] && mv -f \"\$f\" \"\$P/submitted/\"; done
+fi
+"
 fi
 
 echo "=== Preparing project in pod (strip macOS cruft, git init, outputs dir) ==="
@@ -385,6 +408,20 @@ echo "=== Verifying Rakefile + configs load under bundler ==="
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
   "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext && bundle exec rake -T > /dev/null" \
   || { echo "Rakefile failed to load in pod" >&2; exit 1; }
+
+# Resume support: delete empty stub analyses and hide batches the server already
+# has, so the rake task only submits what is missing (no duplicates).
+RECONCILE_RB="$(dirname "$0")/jump_pod_reconcile.rb"
+run_reconcile() {
+  kubectl exec -i -n "$NAMESPACE" "$POD" -- ruby - "$1" "$IN_CLUSTER_SERVER_URI" "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" < "$RECONCILE_RB"
+}
+if [[ "$CHECK_ONLY" == "1" ]]; then
+  echo "=== CHECK_ONLY=1: expected vs created batches ==="
+  run_reconcile check
+  exit $?
+fi
+echo "=== Reconciling with server (skip completed batches, remove empty stubs) ==="
+run_reconcile reconcile || echo "WARNING: reconcile failed; continuing without resume filtering" >&2
 
 # Measure 4: Manifest verification — skip launch if complete manifest exists.
 MANIFEST_FILE="${REMOTE_ROOT}/outputs/${PROJECT_NAME}/osa_submit_manifest.jsonl"
@@ -530,6 +567,10 @@ Tail progress:
 
 Check if it's still running:
   kubectl exec -n ${NAMESPACE} ${POD} -- pgrep -fal rake
+
+Verify expected vs created batches (non-zero exit + missing list if incomplete);
+safe to rerun this script after a pod eviction -- it resumes where it stopped:
+  CHECK_ONLY=1 $0 ${GEM_DIR} ${RAKE_TASK}
 
 Pull results back to your machine when done:
   kubectl cp ${NAMESPACE}/${POD}:${REMOTE_ROOT}/outputs ${GEM_DIR}/outputs_from_jump_pod

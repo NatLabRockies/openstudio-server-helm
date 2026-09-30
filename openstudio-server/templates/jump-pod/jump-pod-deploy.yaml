@@ -48,5 +48,6 @@ spec:
         persistentVolumeClaim:
           claimName: {{ .Values.nfs_pvc.name }}
       - name: output-volume
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: {{ .Values.jump_pod.outputsSizeLimit | quote }}
 {{- end }}
