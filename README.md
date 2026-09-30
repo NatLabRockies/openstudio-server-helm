@@ -332,7 +332,7 @@ All scripts in `scripts/` retry transient API gateway errors (502/503/504) via `
 | `clean-operational.sh` | **Destructive**: clears NFS, MongoDB and Redis contents while keeping volumes (asks for confirmation) |
 | `port_forward_kubectl.sh` | Stable `kubectl port-forward` to `web` on `localhost:61570` |
 | `submit_from_jump_pod.sh`, `install_jump_pod_gems.sh` | In-cluster submission, see [docs/jump-pod.md](./docs/jump-pod.md) |
-| `pulp_login.py` | Log in to a Pulp registry (requires `requests`) |
+| `pulp_login.py` | Log in to a Pulp registry via Keycloak device flow; pass `--registry`, `--client-id`, `--keycloak-url` (or `PULP_*` env vars); requires `requests` |
 
 ## Auto Scaling
 

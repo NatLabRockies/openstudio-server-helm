@@ -10,7 +10,7 @@ Example:
     --client-id pulp-client
 
 Every option can also be set via an environment variable (PULP_REGISTRY,
-PULP_KEYCLOAK_URL, PULP_args.client_id, PULP_args.token_url, PULP_args.device_url,
+PULP_KEYCLOAK_URL, PULP_CLIENT_ID, PULP_TOKEN_URL, PULP_DEVICE_URL,
 PULP_USERNAME).
 """
 import argparse
@@ -27,15 +27,15 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--registry", default=env("PULP_REGISTRY"),
                    help="Registry host to docker login to (env: PULP_REGISTRY)")
-    p.add_argument("--client-id", default=env("PULP_args.client_id"),
-                   help="Keycloak client id (env: PULP_args.client_id)")
+    p.add_argument("--client-id", default=env("PULP_CLIENT_ID"),
+                   help="Keycloak client id (env: PULP_CLIENT_ID)")
     p.add_argument("--keycloak-url", default=env("PULP_KEYCLOAK_URL"),
                    help="Keycloak realm URL, e.g. https://sso.example.org/realms/myrealm; "
                         "token and device endpoints are derived from it (env: PULP_KEYCLOAK_URL)")
-    p.add_argument("--token-url", default=env("PULP_args.token_url"),
-                   help="Override the token endpoint (env: PULP_args.token_url)")
-    p.add_argument("--device-url", default=env("PULP_args.device_url"),
-                   help="Override the device authorization endpoint (env: PULP_args.device_url)")
+    p.add_argument("--token-url", default=env("PULP_TOKEN_URL"),
+                   help="Override the token endpoint (env: PULP_TOKEN_URL)")
+    p.add_argument("--device-url", default=env("PULP_DEVICE_URL"),
+                   help="Override the device authorization endpoint (env: PULP_DEVICE_URL)")
     p.add_argument("--username", default=env("PULP_USERNAME"),
                    help="Registry username; prompted if omitted (env: PULP_USERNAME)")
     args = p.parse_args()
