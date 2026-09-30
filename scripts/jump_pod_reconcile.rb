@@ -8,14 +8,15 @@
 #                   to PROJECT_DIR/submitted/ so the rake glob only sees remaining ones
 #   MODE=check      report expected vs created; exit 1 if any batch is missing/empty
 #
-# A batch is matched to an analysis when the analysis name/display_name contains
-# "Batch<N>" (case-insensitive, N not followed by a digit).
+# A batch is matched to an analysis only when its name/display_name contains the
+# project name AND "Batch<N>" (N not preceded/followed by a digit or letter).
+# Status lookup errors abort the run without deleting anything.
 require 'json'
 require 'net/http'
 require 'fileutils'
 
-mode, base, dir = ARGV
-abort 'usage: MODE SERVER_URI PROJECT_DIR' unless mode && base && dir
+mode, base, dir, project = ARGV
+abort 'usage: MODE SERVER_URI PROJECT_DIR PROJECT_NAME' unless mode && base && dir && project
 
 def http_json(method, url)
   uri = URI(url)
@@ -29,16 +30,19 @@ end
 def datapoint_count(base, id)
   st = http_json('get', "#{base}/analyses/#{id}/status.json")
   dps = st.is_a?(Hash) && st['analysis'] ? st['analysis']['data_points'] : nil
-  dps.is_a?(Array) ? dps.size : 0
-rescue StandardError
-  0
+  raise "unexpected status payload for #{id}" unless dps.is_a?(Array)
+  dps.size
+end
+
+def batch_of(f)
+  File.basename(f)[/Batch_?(\d+)(?!\d)/i, 1]&.to_i
 end
 
 expected = {}
 [dir, File.join(dir, 'submitted')].each do |d|
   Dir.glob(File.join(d, 'parametric_space*Batch*.json')).each do |f|
-    n = File.basename(f)[/Batch_?(\d+)/i, 1]
-    expected[n.to_i] = f if n
+    n = batch_of(f)
+    expected[n] = f if n
   end
 end
 abort "No parametric_space batch files found in #{dir}" if expected.empty?
@@ -47,7 +51,8 @@ analyses = http_json('get', "#{base}/analyses.json") || []
 by_batch = Hash.new { |h, k| h[k] = [] }
 analyses.each do |a|
   label = [a['name'], a['display_name']].compact.join(' ')
-  n = label[/Batch_?(\d+)(?!\d)/i, 1]
+  next unless label.include?(project)
+  n = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
   by_batch[n.to_i] << a if n
 end
 
@@ -71,12 +76,10 @@ if mode == 'reconcile'
   end
   FileUtils.mkdir_p(File.join(dir, 'submitted'))
   done_batches.each do |n|
-    f = expected[n]
-    next if File.dirname(f).end_with?('submitted')
-    FileUtils.mv(f, File.join(dir, 'submitted', File.basename(f)))
-    # matching measure space file, if any
-    Dir.glob(File.join(dir, "measure_space*Batch*#{n}.json")).each do |m|
-      FileUtils.mv(m, File.join(dir, 'submitted', File.basename(m)))
+    Dir.glob(File.join(dir, '{parametric_space,measure_space}*Batch*.json')).each do |f|
+      next unless batch_of(f) == n
+      dest = File.join(dir, 'submitted', File.basename(f))
+      File.exist?(dest) ? FileUtils.rm_f(f) : FileUtils.mv(f, dest)
     end
   end
   puts "remaining batches to submit: #{(expected.keys - done_batches).size}"
