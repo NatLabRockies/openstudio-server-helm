@@ -45,6 +45,13 @@ routing to the stable Kubernetes `NodePort` upstream rather than the unstable
 Octavia VIP path. This is the recommended path until the platform-level
 Octavia/LB issue is fixed.
 
+The proxy VM's nginx upstream is the `web` Service NodePort on the node IPs
+(default `32105`, see `nodeport_port` in `terraform-proxy-vm`), so your values
+file **must** set `web_svc.type: NodePort` and `web_svc.nodePorts.http: 32105`
+(already in `values-openstack.yaml.template`). The chart's default Service type
+is ClusterIP; if a values file lacks this, an upgrade silently drops the
+NodePort and the proxy returns `502 Bad Gateway`.
+
 ## Troubleshooting
 
 - **Proxy VM returns `504 Gateway Time-out`**: nginx's default
@@ -61,6 +68,12 @@ Octavia/LB issue is fixed.
   not `rocky`) with the private key for the VM's `keypair_name`.
   If it is still slow, reduce load: raise the web pod's CPU/memory requests
   in `values-openstack.yaml` (or lower `worker-hpa` maxReplicas).
+- **Proxy VM returns `502 Bad Gateway` after a `helm upgrade`, but the web pod
+  is Running**: check `kubectl get svc web -n openstudio-server`. If it is
+  `ClusterIP`, your values file is missing `web_svc.type: NodePort` and
+  `web_svc.nodePorts.http` (match the proxy's `nodeport_port`, default `32105`).
+  Add them (copy from `values-openstack.yaml.template`) and re-run the upgrade
+  with `-n openstudio-server`.
 - **`StorageClass "ssd" ... exists and cannot be imported into the current
   release: invalid ownership metadata`**: a `ssd` StorageClass from a
   previous/different release or namespace is still on the cluster. If
