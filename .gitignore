@@ -3,6 +3,7 @@ aws/values-aws.yaml
 
 # Secrets file - generated from template, do not commit
 openstack/values-openstack.yaml
+.terraform/
 
 # Local operational/remediation state - never commit
 .health-remediation-state/
@@ -17,3 +18,10 @@ openstack/values-openstack.yaml
 
 # Helm dependency archives
 *.tgz
+
+# .venv
+.venv/
+
+# tmp
+tmp/
+.DS_Store

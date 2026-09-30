@@ -1,0 +1,52 @@
+{{- if .Values.jump_pod.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.jump_pod.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.jump_pod.label }}
+    release: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.jump_pod.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.jump_pod.label }}
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.jump_pod.label }}
+        release: {{ .Release.Name }}
+    spec:
+      affinity:
+        {{- include "openstudio.nodeGroupAffinity" (dict "root" . "role" "web") | nindent 8 }}
+        {{- if .Values.jump_pod.colocateWithWeb }}
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: {{ .Values.web.name }}
+                  release: {{ .Release.Name }}
+              topologyKey: "kubernetes.io/hostname"
+        {{- end }}
+      containers:
+      - name: jump-pod
+        image: {{ include "openstudio.imageWithRegistry" (dict "root" $ "image" .Values.jump_pod.image) | quote }}
+        imagePullPolicy: IfNotPresent
+        command:
+{{ toYaml .Values.jump_pod.command | indent 8 }}
+        resources:
+{{ toYaml .Values.jump_pod.resources | indent 10 }}
+        volumeMounts:
+        - name: nfs-volume
+          mountPath: /mnt/openstudio
+        - name: output-volume
+          mountPath: /outputs
+      volumes:
+      - name: nfs-volume
+        persistentVolumeClaim:
+          claimName: {{ .Values.nfs_pvc.name }}
+      - name: output-volume
+        emptyDir: {}
+{{- end }}

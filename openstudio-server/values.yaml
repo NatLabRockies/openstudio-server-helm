@@ -118,18 +118,21 @@ containerdRegistryConfig:
     extraImages: []
 
 # Hook configuration
-# Pre-delete hook ("nfs-client-cleanup" Job) drains all release workloads except
-# the NFS server provisioner subchart, waits for client pods to be gone, and
-# force-deletes leftovers. It keeps the NFS server up until every client pod has
-# unmounted, so pods cannot hang in Terminating on a dead NFS mount.
+# Pre-delete hook ("nfs-client-cleanup" Pod) deletes release workloads except
+# the NFS server provisioner, force-deletes remaining pods immediately (no blocking
+# kubectl wait — the previous wait caused hangs when pods were in D-state on dead
+# NFS mounts), exits unconditionally, and deletes PriorityClasses/StorageClass.
 hooks:
   preDeleteCleanup:
-    image: "bitnami/kubectl:latest" # single source of truth for the hook image
-    # Total Job budget: image pull + workload deletion + podWaitTimeoutSeconds +
-    # force-delete + settle. Keep comfortably above podWaitTimeoutSeconds.
-    activeDeadlineSeconds: 300
-    # How long to wait for client pods to drain before force-deleting them.
-    podWaitTimeoutSeconds: 120
+    image: "bitnami/kubectl:1.29.2" # pinned version; fixes 502/API instability from :latest
+    # Total Pod budget: image pull + workload deletion + force-delete + settle.
+    # No blocking wait (eliminates D-state hang); keep comfortably above settle time.
+    activeDeadlineSeconds: 600
+    # When true, the pre-delete hook deletes cluster-scoped PriorityClasses
+    # and StorageClass during uninstall (full cleanup). Set to false if other
+    # releases share them or if you only ever upgrade (deleting them can break
+    # scheduling during failed upgrade/uninstall cycles).
+    deleteClusterResources: true
 
 # Set to google, aws, azure, or openstack
 provider:
@@ -189,6 +192,7 @@ db:
       - "ReadWriteOnce"
 
 load_balancer:
+  enabled: true
   name: "ingress-load-balancer"
   externalTrafficPolicy: "Local"
   label: "web"
@@ -272,6 +276,8 @@ web_background:
 web:
   name: "web"
   label: "web"
+  initContainer:
+    image: "busybox:1.36"
   secret_key_value: "c4ab6d293e4bf52ee92e8dda6e16dc9b5448d0c5f7908ee40c66736d515f3c29142d905b283d73e5e9cef6b13cd8e38be6fd3b5e25d00f35b259923a86c7c473"
   # passenger_max_request_queue_size: "1600"
   # Use this formula (1024 * memory of web pod in Gi * 0.75) / memory per passenger process
@@ -304,6 +310,15 @@ web_svc:
   ports:
     http: 80
     https: 443
+  # Service type. Leave empty for the cluster default (ClusterIP). Set to
+  # NodePort when something outside the cluster (e.g. the nginx proxy VM in
+  # openstack/terraform-proxy-vm) must reach the web service on the node IPs.
+  type: ""
+  # Fixed node ports, only used when type is NodePort. Leave empty to let
+  # Kubernetes allocate them.
+  nodePorts:
+    http: ""
+    https: ""
 
 worker:
   name: "worker"
@@ -346,8 +361,48 @@ worker_hpa:
   # slowing scale-up responsiveness.
   scaleDownPolicyValue: null
 
+# Optional jump pod for in-cluster OSA submission (bypasses localhost tunnel).
+# Disabled by default. When enabled, deploys a long-running pod with the full
+# server image + CLI gems so users can kubectl exec into it and submit analyses
+# directly via the internal service URL (e.g., http://openstudio-server/web).
+jump_pod:
+  enabled: false
+  name: "jump-pod"
+  label: "jump-pod"
+  # Server image version. Must match the web/worker image so the jump pod has
+  # the same OpenStudio CLI and openstudio_meta as the rest of the deployment.
+  # Note: openstudio_meta hardcodes GEM_HOME=/opt/openstudio/gems, which ships
+  # EMPTY in the stock image. In-cluster submission additionally requires
+  # rubyzip, openstudio-analysis, and openstudio-aws installed into that exact
+  # directory. scripts/submit_from_jump_pod.sh does this automatically.
+  # See feature docs: docs/jump-pod.md
+  image: "nrel/openstudio-server:3.10.0-179D-test"
+  replicas: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: "1Gi"
+    limits:
+      cpu: 1000m
+      memory: "2Gi"
+  # Keep container alive for repeated kubectl exec submissions
+  command: ["/bin/sh", "-c", "sleep infinity"]
+  # Pin the jump pod to the same node as the web pod. Use this when pod-to-pod
+  # traffic across nodes is unreliable (see
+  # docs/port-forward-and-jump-pod-troubleshooting.md). The pod stays Pending
+  # until a web pod is scheduled, so it is off by default.
+  colocateWithWeb: false
+
 # Cluster Autoscaler configuration
 clusterAutoscaler:
+  # Deploys the upstream Kubernetes cluster-autoscaler, which watches for
+  # unschedulable pods and grows/shrinks a cloud-provider-managed node group
+  # (ASG/MIG/VMSS/etc.) to fit. Only works when `provider.name` maps to one
+  # of the cloud-autoscaler's supported --cloud-provider values (e.g. "aws",
+  # "gce", "azure"). Set to false for providers/platforms where the
+  # in-cluster autoscaler cannot reach the API it needs to scale nodes (see
+  # openstack/values-openstack.yaml for why this is disabled on Azimuth).
+  enabled: true
   image: "registry.k8s.io/autoscaling/cluster-autoscaler:v1.26.6"
   # Host path for the CA bundle, mounted read-only into the container at
   # /etc/ssl/certs/ca-certificates.crt so the autoscaler can make TLS calls

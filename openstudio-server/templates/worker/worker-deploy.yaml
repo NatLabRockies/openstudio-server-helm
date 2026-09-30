@@ -7,7 +7,9 @@ metadata:
   annotations:
     cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
 spec:
-  replicas: 1
+  {{- if not .Values.worker_hpa.name }}
+  replicas: {{ .Values.worker.replicas | default 1 }}
+  {{- end }}
   selector:
     matchLabels:
       app: {{ .Values.worker.name }}
@@ -36,19 +38,16 @@ spec:
                   - /bin/sh
                   - -c
                   - |
-                    echo "Creating kill.worker file" >&2
-                    touch /opt/openstudio/server/bin/kill.worker
-                    echo "Sending QUIT signal to Resque" >&2
-                    pkill -f -QUIT resque || true
-                    echo "Waiting for Ruby or OpenStudio processes to end (max 50s)" >&2
-                    timeout=50
-                    while [ $timeout -gt 0 ] && ( [ $(eval "pgrep -c ruby") -gt 1 ] || [ $(eval "pgrep -c openstudio") -gt 0 ] ); do
-                      sleep 2
-                      echo "Still waiting... ($timeout seconds remaining)" >&2
-                      timeout=$((timeout-2))
-                    done
-                    echo "Killing remaining processes" >&2
-                    pkill -P 1 || true
+                    # Pre-stop cleanup. No dependency on NFS-mounted paths.
+                    # Every command uses timeout and || true so D-state hangs
+                    # cannot block terminationGracePeriodSeconds.
+                    echo "Sending QUIT signal to Resque" >&2 || true
+                    timeout 2 pkill -f -QUIT resque 2>/dev/null || true
+                    echo "Waiting briefly for processes" >&2 || true
+                    timeout 10 bash -c 'for i in $(seq 1 25); do [ $(pgrep -c ruby 2>/dev/null || echo 10) -le 1 ] && [ $(pgrep -c openstudio 2>/dev/null || echo 10) -le 0 ] && exit 0; sleep 2; done; exit 1' 2>/dev/null || echo "Timeout reached; forcing exit" >&2 || true
+                    echo "Killing remaining processes" >&2 || true
+                    timeout 2 pkill -P 1 2>/dev/null || true
+                    echo "Pre-stop complete" >&2 || true
           resources:
             requests:
               cpu:  {{  .Values.worker.container.resources.requests.cpu  }}

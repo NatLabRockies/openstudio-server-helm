@@ -13,7 +13,18 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1
+      # maxSurge MUST stay 0 here. web_background.replicas is pinned to 1 by
+      # an explicit openstudio-server developer constraint (only the worker
+      # deployment may run >1 replica), but maxSurge: 1 quietly broke that
+      # during every rollout: Kubernetes would start a second web-background
+      # pod before terminating the old one, and since each pod boots
+      # OS_SERVER_NUMBER_OF_WORKERS (150 in the openstack values) Resque
+      # workers against the shared background/analyses queues, the two pods
+      # would briefly run 300 workers and both pull from the same queues.
+      # maxSurge: 0 makes the rollout terminate-then-create, which honours
+      # the 1-replica invariant at the cost of a short gap in background
+      # processing.
+      maxSurge: 0
       maxUnavailable: 1
   template:
     metadata:

@@ -237,6 +237,9 @@ Usage (inside a shell script body):
   {{- include "openstudio.containerdRegistryConfigScript" . }}
 */}}
 {{- define "openstudio.containerdRegistryConfigScript" -}}
+# Always emit at least a no-op so write_configs() isn't an empty shell
+# function (empty { } produces syntax errors in some sh parsers).
+echo "# no node-level registry config entries (localRegistry disabled or no extraMirrors)"
 {{- $root := . -}}
 {{- $shouldRewrite := include "openstudio.localRegistryShouldRewrite" $root -}}
 {{- if eq $shouldRewrite "true" -}}
@@ -313,7 +316,18 @@ Usage (inside a shell script body):
 {{- $sock := $root.Values.containerdRegistryConfig.prewarmImages.containerdSockPath -}}
 {{- $ctr := $root.Values.containerdRegistryConfig.prewarmImages.ctrBinaryPath -}}
 export CONTAINERD_ADDRESS="/host{{ $sock }}"
-CTR="/host{{ $ctr }}"
+CTR="/downloads/bin/ctr"
+# Skip gracefully if binary or socket missing — separate sequential
+# checks so nested else/fi blocks don't conflict with function closing }.
+if [ ! -f "$CTR" ]; then
+  echo "WARNING: missing ctr binary ($CTR) — skipping pre-warm."
+  exit 0
+fi
+if [ ! -S "/host{{ $sock }}" ]; then
+  echo "WARNING: missing containerd socket (/host{{ $sock }}) — skipping pre-warm."
+  exit 0
+fi
+echo "CTR binary and socket found; starting pre-warm."
 {{- range (include "openstudio.prewarmImageList" $root | trim | splitList "\n") }}
 {{- if . }}
 echo "pre-warming image {{ . }}"

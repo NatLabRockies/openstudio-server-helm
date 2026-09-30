@@ -35,6 +35,16 @@ See [`values-openstack.yaml`](./values-openstack.yaml) for the values this
 sets, and the top-level [README](../README.md) for general chart install
 instructions.
 
+## Terraform proxy VM workaround
+
+For the Azimuth/OpenStack environment described in the handoff, the chart's
+`load_balancer` path is not reliable. A working Terraform-based workaround is
+provided in [`terraform-proxy-vm/`](./terraform-proxy-vm/README.md): it
+creates the proxy VM, security group, floating IP, and nginx config while
+routing to the stable Kubernetes `NodePort` upstream rather than the unstable
+Octavia VIP path. This is the recommended path until the platform-level
+Octavia/LB issue is fixed.
+
 ## Troubleshooting
 
 - **`StorageClass "ssd" ... exists and cannot be imported into the current
@@ -92,3 +102,21 @@ instructions.
   instead, after clearing any stuck pods
   (`kubectl delete pods --all -n <namespace> --grace-period=0 --force`).
 
+- **Resque UI looks frozen / simulations appear stalled**: check for all three
+  causes before assuming the cluster is wedged — throughput is usually
+  non-zero but degraded.
+  1. **Zombie Resque workers** (registered in Redis, pod no longer exists) hold
+     jobs that will never run. Compare `SMEMBERS resque:workers` against live
+     pods; snapshot Redis *first*, then `kubectl`, to avoid race false-positives.
+  2. **Unschedulable/unpullable worker pods** pin `worker-hpa` at
+     `maxReplicas` so it can't react. See the `worker_hpa.maxReplicas` notes in
+     `values-openstack.yaml.template`.
+  3. **Slow-by-design simulations.** Wall-clock is dominated by the analysis's
+     building type (~15x spread; `SecondarySchool` averages 159 min vs
+     `SmallOffice` at 9 min) against a uniform client-submitted 4h
+     `run_workflow_timeout`. Full write-up:
+     [`docs/simulation-timeout-building-type-incident.md`](../docs/simulation-timeout-building-type-incident.md).
+
+  Note the Mongo database is `os_docker` (not `os_server`), and the
+  `containerd-registry-config` DaemonSet adds ~9,000 pods to every
+  `kubectl get pods` listing — filter it out.

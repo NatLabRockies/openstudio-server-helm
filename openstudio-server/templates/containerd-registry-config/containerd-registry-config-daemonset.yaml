@@ -75,6 +75,41 @@ spec:
                       - {{ default "worker-group" .Values.node_group.worker_value }}
       priorityClassName: system-node-critical
       hostPID: true
+      initContainers:
+        {{- if $prewarm }}
+        - name: download-ctr
+          image: alpine:3.19
+          command:
+            - sh
+            - -c
+            - |
+              VERSION="1.7.13"
+              case "$(uname -m)" in
+                x86_64) ARCH=amd64 ;;
+                aarch64|arm64) ARCH=arm64 ;;
+                *) echo "unsupported architecture: $(uname -m)"; exit 1 ;;
+              esac
+              URL="https://github.com/containerd/containerd/releases/download/v${VERSION}/containerd-${VERSION}-linux-${ARCH}.tar.gz"
+              # Option B (shared/NFS): use a RWX persistent claim so any node
+              # (including new autoscaled nodes) can read the pre-staged binary.
+              # If the binary already exists (pre-staged from an existing node),
+              # skip download entirely.
+              mkdir -p /downloads/bin
+              if [ -f "/downloads/bin/ctr" ]; then
+                echo "Pre-staged ctr binary found at /downloads/bin/ctr; skipping download."
+              else
+                if command -v wget >/dev/null 2>&1; then
+                  wget -qO- "$URL" | tar xz -C /downloads/bin --strip-components=1 bin/ctr || { echo "download/extract failed"; exit 1; }
+                else
+                  echo "wget not available in alpine image"
+                  exit 1
+                fi
+              fi
+              ls -l /downloads/bin/ctr || exit 1
+          volumeMounts:
+            - mountPath: /downloads
+              name: ctr-download
+        {{- end }}
       containers:
         - name: writer
           image: {{ .Values.containerdRegistryConfig.image | quote }}
@@ -112,8 +147,8 @@ spec:
             {{- if $prewarm }}
             - mountPath: /host{{ .Values.containerdRegistryConfig.prewarmImages.containerdSockPath }}
               name: containerd-sock
-            - mountPath: /host{{ .Values.containerdRegistryConfig.prewarmImages.ctrBinaryPath }}
-              name: ctr-bin
+            - mountPath: /downloads
+              name: ctr-download
             {{- end }}
       volumes:
         - name: etc-containerd
@@ -125,9 +160,9 @@ spec:
           hostPath:
             path: {{ .Values.containerdRegistryConfig.prewarmImages.containerdSockPath }}
             type: Socket
-        - name: ctr-bin
-          hostPath:
-            path: {{ .Values.containerdRegistryConfig.prewarmImages.ctrBinaryPath }}
-            type: File
+        - name: ctr-download
+          persistentVolumeClaim:
+            claimName: {{ .Values.nfs_pvc.name | default "nfs-pvc" }}
+            readOnly: false
         {{- end }}
 {{- end }}
