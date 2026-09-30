@@ -303,6 +303,37 @@ localRegistry:
   ([#110](https://github.com/NatLabRockies/openstudio-server-helm/issues/110), see also
   [openstack/README.md](./openstack/README.md#troubleshooting)).
 
+## Port-Forward Tunnel Reliability (Lens vs. kubectl)
+
+When connecting from a local client (e.g., `openstudio-bem-to-surrogate-gem`) to the server via `localhost:61570`, Lens application port-forwards can become unstable under long-running sequential analysis submissions (`rake execute_sequential`). If you observe `Connection refused - connect(2) for "localhost" port 61570` errors after a period of successful submits, the Lens tunnel may have dropped while its UI still reports `Active`.
+
+**Recommended workaround:** Bypass Lens with a dedicated `kubectl port-forward` process that is independent of the Lens application lifecycle:
+
+```bash
+# From openstudio-bem-to-surrogate-gem
+bash scripts/port_forward_kubectl.sh
+```
+
+This script creates a persistent `kubectl port-forward -n openstudio-server service/web 61570:80` tunnel. It also kills leftover Lens-managed `kubectl` processes that can conflict on the same port. The tunnel remains alive as long as the `kubectl` process runs, making it more reliable for multi-hour sequential analysis runs.
+
+See [docs/port-forward-and-jump-pod-troubleshooting.md](./docs/port-forward-and-jump-pod-troubleshooting.md) for 502s and stale-tunnel diagnosis, and [docs/jump-pod.md](./docs/jump-pod.md) for submitting from inside the cluster instead.
+
+Note: Reducing `passenger_memory_per_process` (and thus `max_pool`) was tested (`250` -> `333` MiB) but did **not** resolve the connection failures; the root cause was tunnel instability, not server overload.
+
+## Helper Scripts
+
+All scripts in `scripts/` retry transient API gateway errors (502/503/504) via `scripts/lib/retry_cmd.sh`. Extra Helm arguments can follow an optional `--`.
+
+| Script | Purpose |
+| --- | --- |
+| `install.sh`, `upgrade.sh` (`--force-conflicts` for HPA-scaled releases), `uninstall.sh`, `*-dry-run.sh` | Helm wrappers with retries, e.g. `scripts/upgrade.sh -f openstack/values-openstack.yaml` |
+| `apply_single_template.sh` | Apply one rendered template with `kubectl` (leaves Helm release state out of sync) |
+| `pre-install-cleanup.sh` | **Destructive**: removes leftover pods, NFS PVCs and PVs before a reinstall (asks for confirmation) |
+| `clean-operational.sh` | **Destructive**: clears NFS, MongoDB and Redis contents while keeping volumes (asks for confirmation) |
+| `port_forward_kubectl.sh` | Stable `kubectl port-forward` to `web` on `localhost:61570` |
+| `submit_from_jump_pod.sh`, `install_jump_pod_gems.sh` | In-cluster submission, see [docs/jump-pod.md](./docs/jump-pod.md) |
+| `pulp_login.py` | Log in to a Pulp registry (requires `requests`) |
+
 ## Auto Scaling
 
 The worker pods are configured to auto-scale based on CPU threshold (default 12%). Once the aggregate CPU for all worker pods exceed the defined threshold (in this case 12%), the Kubernetes engine will start adding additional worker pods up to the maximum specified. This is also dependent on how the Kuebernetes cluster was configured as additional VM node instances will also be added. Please refer to the notes on [aws](/aws/README.md) and [google](/google/README.md) when setting up the cluster and note the instance type and maximum nodes specified.

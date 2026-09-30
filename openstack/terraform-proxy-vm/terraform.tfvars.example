@@ -1,0 +1,16 @@
+cloud_name        = ""
+name              = "openstudio-proxy-vm"
+network_name      = "portal-internal"
+floating_ip_pool  = "public"
+image_name        = "Rocky Linux 9.8"
+flavor_name       = "m1.small"
+keypair_name      = "your-keypair-name"
+ssh_cidr          = "0.0.0.0/0"
+nodeport_port     = 32105
+# Required. Node IPs of the cluster running the web Service, e.g.
+#   kubectl get nodes -o wide   (INTERNAL-IP column)
+# Refresh these if the node group is recreated.
+nodeport_upstream_hosts = [
+  "10.0.0.11",
+  "10.0.0.12",
+]

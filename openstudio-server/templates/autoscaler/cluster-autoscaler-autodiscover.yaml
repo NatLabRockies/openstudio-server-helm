@@ -1,3 +1,4 @@
+{{- if .Values.clusterAutoscaler.enabled }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -194,3 +195,4 @@ spec:
         - name: ssl-certs
           hostPath:
             path: {{ .Values.clusterAutoscaler.caCertsHostPath | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+{{- end }}

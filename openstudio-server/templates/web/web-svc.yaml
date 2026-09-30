@@ -3,6 +3,9 @@ kind: Service
 metadata:
   name: {{ .Values.web_svc.name   }}
 spec:
+  {{- with .Values.web_svc.type }}
+  type: {{ . }}
+  {{- end }}
   selector:
     app: {{ .Values.web.name  }}
     release: {{ .Release.Name }}
@@ -10,6 +13,12 @@ spec:
     - name: http
       protocol: TCP
       port: {{ .Values.web_svc.ports.http   }}
+      {{- with .Values.web_svc.nodePorts.http }}
+      nodePort: {{ . }}
+      {{- end }}
     - name: https
       protocol: TCP
       port:  {{ .Values.web_svc.ports.https   }}
+      {{- with .Values.web_svc.nodePorts.https }}
+      nodePort: {{ . }}
+      {{- end }}

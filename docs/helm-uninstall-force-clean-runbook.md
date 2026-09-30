@@ -132,9 +132,11 @@ fixes, the hook:
   reliable selection, missing in the first iteration)
 - deletes HPAs first (so no autoscaler races the drain), then client
   Deployments/StatefulSets/Jobs (excluding the NFS provisioner)
-- **authoritatively waits** for client pods to disappear (no `|| true` masking),
-  force-deletes stragglers, and fails loudly if anything survives — while the NFS
-  provisioner stays up until the hook returns, so client mounts never hit a dead server
+- retries each required delete with backoff (transient API 502s), force-deletes
+  remaining pods immediately, and fails the hook if workloads could not be deleted
+  after retries. It does **not** block on `kubectl wait` for pod termination (that wait
+  hung on pods stuck `Terminating` in D-state). The NFS provisioner stays up until the
+  hook returns, so client mounts never hit a dead server
 - deletes the chart's PriorityClasses and `ssd` StorageClass deterministically
   (helm's own cluster-scoped delete can leave them behind on a watch-stream hiccup)
 - runs under hook-resource RBAC (SA/Role/RoleBinding + ClusterRole/ClusterRoleBinding

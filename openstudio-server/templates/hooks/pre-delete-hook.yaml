@@ -9,7 +9,7 @@ metadata:
     # Delete the hook Job whether it succeeds OR fails. A lingering Failed hook
     # Job would otherwise block every subsequent `helm uninstall` -- this was the
     # root cause of the 2026-08-14 incident (distroless kubectl image).
-    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed,before-hook-creation
 spec:
   # Total budget for the Job (image pull + all cleanup steps). Must comfortably
   # exceed podWaitTimeoutSeconds + settle sleep or the Job is killed mid-cleanup
@@ -31,55 +31,70 @@ spec:
             - /bin/sh
             - -c
             - |
-              set -e
               NS={{ .Release.Namespace }}
               REL={{ .Release.Name }}
+              DELETE_CLUSTER_RESOURCES="{{ .Values.hooks.preDeleteCleanup.deleteClusterResources }}"
+              FAILED=0
+              # Retries "$@" with backoff; the API endpoint can return transient 502s.
+              retry() {
+                i=1
+                while [ "$i" -le 3 ]; do
+                  "$@" && return 0
+                  echo "[pre-delete] Attempt $i failed (possible 502/proxy error): $*"
+                  sleep $((i * 5))
+                  i=$((i + 1))
+                done
+                return 1
+              }
+              # Required step: a failure means workloads may still hold NFS mounts.
+              required() { retry "$@" || { echo "[pre-delete] ERROR: $*"; FAILED=1; }; }
+              # Best-effort step: log and continue.
+              best_effort() { retry "$@" || echo "[pre-delete] WARNING (ignored): $*"; }
               echo "[pre-delete] Cleaning up OpenStudio Server resources in $NS"
               # Delete HPAs first so no autoscaler races the drain (e.g. a huge
               # worker HPA scaling a deployment back up mid-cleanup).
-              kubectl -n "$NS" delete hpa -l "release=$REL" --ignore-not-found=true
+              required kubectl -n "$NS" delete hpa -l "release=$REL" --ignore-not-found=true
               # Delete all workloads managed by this release (cascades to pods).
               # Exclude the NFS server provisioner subchart (app=nfs-server-provisioner)
               # so its NFS server stays up while client pods unmount -- otherwise
               # client mounts hang/fail and pods stick in Terminating (dead-NFS D-state).
-              kubectl -n "$NS" delete deployment -l "release=$REL,app!=nfs-server-provisioner" --ignore-not-found=true
-              kubectl -n "$NS" delete statefulset -l "release=$REL,app!=nfs-server-provisioner" --ignore-not-found=true
-              kubectl -n "$NS" delete job -l "release=$REL" --ignore-not-found=true
-              # Authoritatively wait for all client pods to be gone. No `|| true`
-              # masking here -- a masked wait is exactly what let helm proceed while
-              # pods were still Terminating (the reported symptom). Failed/Succeeded
-              # pods are excluded from the wait (they can never terminate) and are
-              # instead removed by the force-delete pass below.
-              echo "[pre-delete] Waiting for client pods to terminate (timeout={{ .Values.hooks.preDeleteCleanup.podWaitTimeoutSeconds }}s)..."
-              kubectl -n "$NS" wait --for=delete pod -l "release=$REL,app!=nfs-server-provisioner" \
-                --timeout={{ .Values.hooks.preDeleteCleanup.podWaitTimeoutSeconds }}s \
-                --field-selector=status.phase!=Failed,status.phase!=Succeeded || \
-                echo "[pre-delete] wait deadline hit; forcing remaining pods"
-              # Force-delete anything still present (Failed pods, grace-timed-out pods).
+              required kubectl -n "$NS" delete deployment -l "release=$REL,app!=nfs-server-provisioner" --ignore-not-found=true
+              required kubectl -n "$NS" delete statefulset -l "release=$REL,app!=nfs-server-provisioner" --ignore-not-found=true
+              required kubectl -n "$NS" delete job -l "release=$REL" --ignore-not-found=true
+              # No blocking wait: force-delete any remaining pods immediately.
               REMAINING=$(kubectl -n "$NS" get pod -l "release=$REL,app!=nfs-server-provisioner" -o name || true)
               if [ -n "$REMAINING" ]; then
-                echo "[pre-delete] force-deleting remaining pods:"
+                echo "[pre-delete] Force-deleting remaining pods:"
                 echo "$REMAINING"
-                kubectl -n "$NS" delete pod -l "release=$REL,app!=nfs-server-provisioner" \
+                best_effort kubectl -n "$NS" delete pod -l "release=$REL,app!=nfs-server-provisioner" \
                   --force --grace-period=0 --ignore-not-found=true
-                sleep 5
-                REMAINING=$(kubectl -n "$NS" get pod -l "release=$REL,app!=nfs-server-provisioner" -o name || true)
               fi
-              if [ -n "$REMAINING" ]; then
-                echo "[pre-delete] ERROR: pods still present after drain and force-delete:" >&2
-                echo "$REMAINING" >&2
-                exit 1
-              fi
-              # Let NFS unmounts propagate before helm deletes the provisioner subchart.
-              echo "[pre-delete] All client pods gone; waiting for NFS unmount propagation..."
+              echo "[pre-delete] Waiting briefly for NFS unmount propagation..."
               sleep 10
               # Delete the chart's cluster-scoped resources deterministically.
               # helm's own uninstall left these behind on a partially-failed run
               # (2026-08-15 Bug B: release stuck "uninstalling" with only the
               # PriorityClasses remaining), so the hook removes them explicitly.
-              echo "[pre-delete] Deleting chart PriorityClasses and StorageClass..."
-              kubectl delete priorityclass high-priority --ignore-not-found=true
-              kubectl delete priorityclass low-priority --ignore-not-found=true
-              kubectl delete storageclass ssd --ignore-not-found=true
+              # Cluster-scoped resources are only deleted when
+              # hooks.preDeleteCleanup.deleteClusterResources=true.
+              echo "[pre-delete] Deleting PVCs (before helm uninstall tries)..."
+              best_effort kubectl -n "$NS" delete pvc nfs-pvc --ignore-not-found=true
+              best_effort kubectl -n "$NS" delete pvc nfs-pvc-data --ignore-not-found=true
+              if [ "$DELETE_CLUSTER_RESOURCES" = "true" ]; then
+                echo "[pre-delete] Deleting chart PriorityClasses and StorageClass..."
+                best_effort kubectl delete priorityclass high-priority --ignore-not-found=true
+                best_effort kubectl delete priorityclass low-priority --ignore-not-found=true
+                best_effort kubectl delete storageclass ssd --ignore-not-found=true
+              else
+                echo "[pre-delete] Skipping PriorityClass/StorageClass deletion (deleteClusterResources=$DELETE_CLUSTER_RESOURCES)"
+              fi
+              echo "[pre-delete] Non-blocking wait for PVC deletion (timeout 30s, never blocks)..."
+              kubectl -n "$NS" wait --for=delete pvc/nfs-pvc --timeout=30s || true
+              kubectl -n "$NS" wait --for=delete pvc/nfs-pvc-data --timeout=30s || true
+              if [ "$FAILED" -ne 0 ]; then
+                echo "[pre-delete] cleanup FAILED: workloads were not deleted; aborting before the NFS provisioner is removed"
+                exit 1
+              fi
               echo "[pre-delete] cleanup complete"
+              exit 0
       restartPolicy: Never

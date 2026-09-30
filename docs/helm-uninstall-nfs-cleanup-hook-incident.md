@@ -173,6 +173,13 @@ The release-label prerequisite is also committed: every workload/HPA the chart c
 carries `release: {{ .Release.Name }}` in `metadata.labels`, which is how the hook
 selects exactly this release's resources (and nothing else) during the drain.
 
+## Revised approach (2026-08-28): eliminate blocking wait, unconditional exit
+
+Changes:
+- `pre-delete-hook.yaml`: removed `kubectl wait --for=delete` entirely; added `before-hook-creation` to delete-policy; required deletes are retried with backoff and the hook fails only if workloads could not be deleted after retries (no blocking wait on remaining pods).
+- `worker-deploy.yaml`: eliminated `/opt/openstudio/server/bin/kill.worker` reference from `preStop`; all commands use `timeout` + `|| true` locally only.
+- Rationale: the synchronous `wait` against pods in `Terminating` (D-state hang from dead NFS) was the deadlock; removing it prevents the hang. Force-delete runs immediately; hook completes quickly.
+
 Tracked future fixes #1-#6 above remain open; item on deleting `nfs-pvc` from the hook
 while the provisioner is still up is still the plan for eliminating the known NFS PV
 residual.
