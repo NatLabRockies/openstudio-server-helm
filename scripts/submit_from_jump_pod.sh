@@ -6,7 +6,8 @@
 # Requires jump_pod.enabled=true (helm --set jump_pod.enabled=true).
 #
 # What this does:
-#   1. Packs a minimal copy of the gem project (skips vendored .bundle gems,
+#   1. Packs a minimal copy of the gem project (skips vendored .bundle gems, .venv,
+#      measure test output,
 #      old outputs/, spec/integration, tmp, sweep_results, SR1, notebook)
 #   2. Copies it into the jump pod under /mnt/openstudio/bem-to-surrogate (PVC)
 #   3. Rewrites the *copy's* configs.yml to use the in-cluster server URL
@@ -222,6 +223,9 @@ P='${REMOTE_ROOT}/outputs/${PROJECT_NAME}'
 [ -f \"\$P/osa_submit_manifest.jsonl\" ] && cp -f \"\$P/osa_submit_manifest.jsonl\" '${STATE_DIR}/' || true
 [ -d \"\$P/submitted\" ] && rm -rf '${STATE_DIR}/submitted' && cp -a \"\$P/submitted\" '${STATE_DIR}/submitted' || true
 "
+# rm can fail on NFS ".nfsXXXX" files held open by a still-running process from an
+# interrupted earlier run; stop those first, then wipe.
+kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'pkill -f "tar -xzf /tmp/bem_to_surrogate_chunks" 2>/dev/null; pkill -f "cat /tmp/bem_to_surrogate_chunks" 2>/dev/null; sleep 1; true' || true
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT" "$REMOTE_TMP"
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- mkdir -p "$REMOTE_ROOT" "$REMOTE_TMP"
 
@@ -252,6 +256,8 @@ echo "=== Packing repo (excluding .bundle, outputs, spec/integration, tmp, sweep
 REPO_TARBALL="$(mktemp -t bem_to_surrogate_XXXX).tar.gz"
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$REPO_TARBALL" -C "$GEM_DIR" \
   --exclude='.bundle' --exclude='outputs' --exclude='spec/integration' \
+  --exclude='.venv' --exclude='venv' --exclude='__pycache__' --exclude='*.pyc' \
+  --exclude='*/tests/output' --exclude='*/tests/run' --exclude='node_modules' \
   --exclude='tmp' --exclude='sweep_results' --exclude='SR1' --exclude='notebook' \
   --exclude='.git' --exclude='.DS_Store' .
 copy_tarball_to_pod "$REPO_TARBALL" repo
