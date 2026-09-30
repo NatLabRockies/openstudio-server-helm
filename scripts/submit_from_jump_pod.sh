@@ -105,7 +105,7 @@ get_jump_pod() {
   local pod="" attempt=1 delay=5
   until [[ -n "$pod" ]]; do
     # Only Running pods: an evicted pod lingers in Error state and sorts first.
-    pod="$(kubectl get pods -n "$NAMESPACE" -l app="$JUMP_POD_LABEL" --field-selector=status.phase=Running -o jsonpath='{range .items[?(@.metadata.deletionTimestamp==null)]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -1 || true)"
+    pod="$(kubectl get pods -n "$NAMESPACE" -l app="$JUMP_POD_LABEL" --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -1 || true)"
     [[ -n "$pod" ]] && break
     if (( attempt >= MAX_RETRIES )); then
       break
