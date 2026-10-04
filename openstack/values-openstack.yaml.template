@@ -52,6 +52,13 @@ localRegistry:
 # Run: openssl rand -hex 64
 web:
   secret_key_value: "{{WEB_SECRET_KEY}}"
+  # Sizing below suits small runs. For very large runs (~8,000+ workers) the
+  # single web pod saturates (slow pages, proxy 504s). Measured at ~8,300
+  # workers: ~210GiB RSS, ~10 busy cores. Use roughly:
+  #   requests: cpu 16, memory 224Gi, and NO limits (throttling/OOM hurt more)
+  #   passenger_memory_per_process: 290   # keeps max_pool ~594 at 224Gi
+  # The web node also hosts mongo, so make sure its flavor fits both.
+  # passenger_memory_per_process: 250
   container:
     image: "nrel/openstudio-server:3.8.0-1"
     resources:
