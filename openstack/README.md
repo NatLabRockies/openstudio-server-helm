@@ -52,7 +52,11 @@ Octavia/LB issue is fixed.
   the single web pod) pages like `/` and `/projects.json` can take >60s. The
   proxy template now sets 600s timeouts; on an existing VM add
   `proxy_read_timeout 600s; proxy_send_timeout 600s;` to the `location /`
-  block in `/etc/nginx/conf.d/proxy.conf` and `sudo systemctl reload nginx`.
+  block in `/etc/nginx/conf.d/proxy.conf` and `sudo systemctl reload nginx`
+  (this patch only addresses the 504s; the template also sets
+  `client_max_body_size 0` so large analysis uploads aren't rejected — add it
+  too if you need that, and monitor the proxy VM's disk since nginx buffers
+  request bodies there).
   SSH in as `cloud@<floating-ip>` (the default user on the Aurora Rocky image,
   not `rocky`) with the private key for the VM's `keypair_name`.
   If it is still slow, reduce load: raise the web pod's CPU/memory requests

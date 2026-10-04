@@ -25,7 +25,6 @@ write_files:
               proxy_set_header X-Forwarded-Proto $scheme;
               proxy_set_header Upgrade $http_upgrade;
               proxy_set_header Connection "";
-              proxy_connect_timeout 60s;
               proxy_send_timeout 600s;
               proxy_read_timeout 600s;
               client_max_body_size 0;
