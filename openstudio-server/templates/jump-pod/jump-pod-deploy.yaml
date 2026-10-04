@@ -49,5 +49,8 @@ spec:
           claimName: {{ .Values.nfs_pvc.name }}
       - name: output-volume
         emptyDir:
-          sizeLimit: {{ .Values.jump_pod.outputsSizeLimit | quote }}
+          {{- with .Values.jump_pod.outputsSizeLimit }}
+          sizeLimit: {{ . | quote }}
+          {{- else }} {}
+          {{- end }}
 {{- end }}

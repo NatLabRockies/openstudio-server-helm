@@ -43,10 +43,17 @@ survive pod recreation; use a prebuilt image to avoid reinstalling.
 - State lives on the PVC, not the `/outputs` emptyDir (now capped by
   `jump_pod.outputsSizeLimit`). `jump_pod.resources` sets `ephemeral-storage`
   requests/limits so the pod fails predictably instead of being the first eviction candidate.
-- Re-running `submit_from_jump_pod.sh` after an eviction is safe: it preserves the manifest,
-  deletes empty stub analyses (0 data points), and moves batches the server already has
-  (matched by `Batch<N>` in the analysis name) into `outputs/<project>/submitted/`, so only
-  missing batches are submitted.
-- `CHECK_ONLY=1 scripts/submit_from_jump_pod.sh <gem> [task]` prints expected vs created batch
-  counts and exits non-zero with `MISSING_BATCHES: ...` if any are missing or empty.
+- Re-running `submit_from_jump_pod.sh` after an eviction is safe: it merges the manifest and
+  `submitted/` into `<REMOTE_ROOT>.state` before re-staging (aborting if that save fails),
+  refuses to restage while the rake task is still running (`FORCE_RESTAGE=1` overrides),
+  deletes empty stub analyses (0 data points, not running, older than `STUB_MIN_AGE`
+  seconds, default 900, and named `<project>...Batch<N>`), and moves batches the server
+  already has into `outputs/<project>/submitted/`, so only missing batches are submitted.
+  If an empty analysis is still young or running, reconcile aborts instead of deleting it; retry later.
+- `REMOTE_ROOT` must be a subdirectory of `PVC_ROOT` (default `/mnt/openstudio`).
+  If several jump pods are running, set `JUMP_POD_RELEASE=<helm release>`.
+- `CHECK_ONLY=1 scripts/submit_from_jump_pod.sh <gem> [task]` is read-only (uses the already-staged
+  project; nothing is copied or deleted). It prints expected vs created batch counts and exits
+  non-zero with `MISSING_BATCHES: ...` and/or `EMPTY_ANALYSES: ...` if any batch is missing or
+  has an empty analysis.
 - Per-batch rescue and write-before/after manifest entries belong in the gem (`create_osa.rb`) and are not handled here.

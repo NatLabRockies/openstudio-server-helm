@@ -9,11 +9,16 @@
 #   MODE=check      report expected vs created; exit 1 if any batch is missing/empty
 #
 # A batch is matched to an analysis only when its name/display_name contains the
-# project name AND "Batch<N>" (N not preceded/followed by a digit or letter).
+# project name (bounded by non-alphanumerics) AND "Batch<N>" (N not preceded/followed
+# by a digit or letter). An analysis is only DELETED if the project name is directly
+# followed by the Batch<N> token (so "foo" never deletes "foo-old" analyses), it has
+# 0 data points, is not running, and is older than STUB_MIN_AGE seconds (default 900).
+# Any young/running empty analysis aborts reconcile (it may still be populating).
 # Status lookup errors abort the run without deleting anything.
 require 'json'
 require 'net/http'
 require 'fileutils'
+require 'time'
 
 mode, base, dir, project = ARGV
 abort 'usage: MODE SERVER_URI PROJECT_DIR PROJECT_NAME' unless mode && base && dir && project
@@ -27,11 +32,23 @@ def http_json(method, url)
   res.body.to_s.empty? ? nil : JSON.parse(res.body)
 end
 
-def datapoint_count(base, id)
+RUNNING_STATES = %w[started queued running pending].freeze
+STUB_MIN_AGE = (ENV['STUB_MIN_AGE'] || 900).to_i
+
+# Returns [data_point_count, analysis_status_string].
+def analysis_state(base, id)
   st = http_json('get', "#{base}/analyses/#{id}/status.json")
-  dps = st.is_a?(Hash) && st['analysis'] ? st['analysis']['data_points'] : nil
+  an = st.is_a?(Hash) ? st['analysis'] : nil
+  dps = an ? an['data_points'] : nil
   raise "unexpected status payload for #{id}" unless dps.is_a?(Array)
-  dps.size
+  [dps.size, an['status'].to_s.downcase]
+end
+
+def age_seconds(a)
+  ts = a['created_at'] || a['updated_at']
+  ts ? Time.now - Time.parse(ts.to_s) : nil
+rescue ArgumentError
+  nil
 end
 
 def batch_of(f)
@@ -48,29 +65,51 @@ end
 abort "No parametric_space batch files found in #{dir}" if expected.empty?
 
 analyses = http_json('get', "#{base}/analyses.json") || []
+proj_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}(?![A-Za-z0-9])/
+strict_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}[\s_.:\-]*(?:parametric_space|measure_space)?[\s_.:\-]*Batch_?\d+(?![A-Za-z0-9])/i
 by_batch = Hash.new { |h, k| h[k] = [] }
 analyses.each do |a|
   label = [a['name'], a['display_name']].compact.join(' ')
-  next unless label.include?(project)
+  next unless label =~ proj_re
   n = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
-  by_batch[n.to_i] << a if n
+  by_batch[n.to_i] << [a, label =~ strict_re ? true : false] if n
 end
 
 done = []
 stubs = []
+in_flight = []
 expected.each_key do |n|
-  by_batch[n].each do |a|
-    (datapoint_count(base, a['_id']) > 0 ? done : stubs) << [n, a]
+  by_batch[n].each do |a, strict|
+    count, status = analysis_state(base, a['_id'])
+    if count > 0
+      done << [n, a]
+    else
+      age = age_seconds(a)
+      if RUNNING_STATES.include?(status) || age.nil? || age < STUB_MIN_AGE
+        in_flight << [n, a]
+      end
+      stubs << [n, a, strict]
+    end
   end
 end
 done_batches = done.map(&:first).uniq
-stub_only = stubs.map(&:first).uniq - done_batches
+stub_batches = stubs.map(&:first).uniq
+stub_only = stub_batches - done_batches
 missing = expected.keys - done_batches
 
 puts "expected=#{expected.size} complete=#{done_batches.size} empty_stub_only=#{stub_only.size} missing=#{missing.size}"
 
 if mode == 'reconcile'
-  stubs.each do |n, a|
+  unless in_flight.empty?
+    ids = in_flight.map { |n, a| "#{a['_id']}(batch #{n})" }.join(', ')
+    abort "Empty analyses that may still be populating (running or younger than #{STUB_MIN_AGE}s): #{ids}. " \
+          'Wait and retry; not deleting or submitting.'
+  end
+  stubs.each do |n, a, strict|
+    unless strict
+      puts "NOT deleting empty analysis #{a['_id']} (batch #{n}): name does not match '#{project}' + Batch#{n} exactly"
+      next
+    end
     puts "deleting empty stub analysis #{a['_id']} (batch #{n})"
     http_json('delete', "#{base}/analyses/#{a['_id']}.json")
   end
@@ -84,9 +123,9 @@ if mode == 'reconcile'
   end
   puts "remaining batches to submit: #{(expected.keys - done_batches).size}"
 else
-  unless missing.empty?
-    puts "MISSING_BATCHES: #{missing.sort.join(',')}"
-    exit 1
-  end
+  empty = stubs.map { |n, a, _| "#{a['_id']}(batch #{n})" }
+  puts "EMPTY_ANALYSES: #{empty.join(',')}" unless empty.empty?
+  puts "MISSING_BATCHES: #{missing.sort.join(',')}" unless missing.empty?
+  exit 1 unless missing.empty? && empty.empty?
   puts 'All expected batches present.'
 end
