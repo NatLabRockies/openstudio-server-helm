@@ -10,6 +10,9 @@ metadata:
 spec:
   # TODO: Investigate how/if nfs-provisioner can be scaled out beyond 1 replica
   replicas: {{ .Values.replicaCount }}
+  # Single RWO data PVC: a RollingUpdate surge pod would hit Multi-Attach errors.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: {{ template "nfs-provisioner.name" . }}
@@ -22,6 +25,9 @@ spec:
         heritage: {{ .Release.Service }}
         release: {{ .Release.Name }}
     spec:
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       # NOTE: This is 10 seconds longer than the default nfs-provisioner --grace-period value of 90sec
       terminationGracePeriodSeconds: 100
       serviceAccountName: {{ if .Values.rbac.create }}{{ template "nfs-provisioner.fullname" . }}{{ else }}{{ .Values.rbac.serviceAccountName | quote }}{{ end }}

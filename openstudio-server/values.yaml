@@ -157,6 +157,7 @@ cluster:
   name: "openstudio-server"
 
 nfs-server-provisioner:
+  priorityClassName: high-priority
   persistence:
     enabled: true
     storageClass: "ssd"

@@ -7,6 +7,8 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-openstudio-server}"
 RELEASE="${RELEASE:-openstudio-server}"
 VALUES_FILE="${1:-}"
+# shellcheck source=lib/nfs_health.sh
+source "$(dirname "$0")/lib/nfs_health.sh"
 
 DB_USER=""
 DB_PASS=""
@@ -83,6 +85,12 @@ if [[ "$confirm" != "yes" ]]; then
   exit 1
 fi
 
+# 0. Preflight: a stale NFS mount on web-background/rserve (after an NFS pod restart) makes every
+# analysis finish with 0 datapoints, so make sure all NFS clients are healthy before and after cleaning.
+echo "=== Preflight: PriorityClasses and NFS clients ==="
+check_priority_classes || { echo "Recreate the PriorityClasses (helm upgrade) and rerun." >&2; exit 1; }
+ensure_nfs_clients_healthy || { echo "NFS clients are not healthy; aborting clean." >&2; exit 1; }
+
 # 1. NFS — list and delete files/dirs under /mnt/openstudio
 echo "=== Cleaning NFS (/mnt/openstudio) ==="
 WEB_POD=$(kubectl get pod -n "$NAMESPACE" -l app=web -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
@@ -95,6 +103,14 @@ if [[ -n "${WEB_POD:-}" ]]; then
   kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'find /mnt/openstudio/server/assets/analyses -maxdepth 3 -mindepth 3 -not -path "*.nfs*" -delete 2>/dev/null || true; echo "analyses done"'
   # Background cleanup for large directories (data_points) to avoid timeout
   kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'nohup sh -c "rm -rf /mnt/openstudio/server/assets/data_points 2>/dev/null; rm -rf /mnt/openstudio/server/assets/* 2>/dev/null; rm -rf /mnt/openstudio/server/* 2>/dev/null; mkdir -p /mnt/openstudio/server/assets /mnt/openstudio/server/R; chmod 2777 /mnt/openstudio/server /mnt/openstudio/server/assets /mnt/openstudio/server/R" > /dev/null 2>&1 </dev/null &'
+  # The deletion above is backgrounded; wait for it so it cannot race new submissions.
+  echo "Waiting for background NFS cleanup to finish..."
+  for _ in $(seq 1 180); do
+    if kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'ps -eo args | grep -q "[r]m -rf /mnt/openstudio/server" && exit 1; test -d /mnt/openstudio/server/R && test -d /mnt/openstudio/server/assets' >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
   # Rails runs as nobody and must be able to recreate assets/ subfolders on upload.
   # server/R is only created at server-image startup; Rserve writes LHS sample plots there and
   # every LHS analysis fails with 0 datapoints if it is missing.
@@ -137,6 +153,14 @@ if [[ -n "${REDIS_POD:-}" ]]; then
 else
   echo "No redis pod found in namespace $NAMESPACE."
 fi
+
+echo ""
+echo "=== Post-clean verification ==="
+ensure_nfs_clients_healthy || { echo "ERROR: NFS clients unhealthy after clean; do NOT submit until fixed." >&2; exit 1; }
+for d in web-background rserve; do
+  kubectl exec -n "$NAMESPACE" "deploy/$d" -- test -d /mnt/openstudio/server/R \
+    || { echo "ERROR: /mnt/openstudio/server/R missing as seen from $d" >&2; exit 1; }
+done
 
 echo ""
 echo "=== Clean complete ==="
