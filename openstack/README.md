@@ -47,6 +47,16 @@ Octavia/LB issue is fixed.
 
 ## Troubleshooting
 
+- **Proxy VM returns `504 Gateway Time-out`**: nginx's default
+  `proxy_read_timeout` is 60s. Under heavy load (thousands of workers hitting
+  the single web pod) pages like `/` and `/projects.json` can take >60s. The
+  proxy template now sets 600s timeouts; on an existing VM add
+  `proxy_read_timeout 600s; proxy_send_timeout 600s;` to the `location /`
+  block in `/etc/nginx/conf.d/proxy.conf` and `sudo systemctl reload nginx`.
+  SSH in as `cloud@<floating-ip>` (the default user on the Aurora Rocky image,
+  not `rocky`) with the private key for the VM's `keypair_name`.
+  If it is still slow, reduce load: raise the web pod's CPU/memory requests
+  in `values-openstack.yaml` (or lower `worker-hpa` maxReplicas).
 - **`StorageClass "ssd" ... exists and cannot be imported into the current
   release: invalid ownership metadata`**: a `ssd` StorageClass from a
   previous/different release or namespace is still on the cluster. If
