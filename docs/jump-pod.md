@@ -24,8 +24,9 @@ pod traffic is unreliable (see [port-forward-and-jump-pod-troubleshooting.md](./
 scripts/submit_from_jump_pod.sh /path/to/openstudio-bem-to-surrogate-gem [rake_task]
 ```
 
-The script copies a minimal project to `/outputs/bem-to-surrogate` (an `emptyDir`, so
-it is lost when the pod is recreated), points the config at the in-cluster URL,
+The script copies a minimal project to `/mnt/openstudio/bem-to-surrogate` (the NFS PVC,
+so the staged repo, log, PID lock and `osa_submit_manifest.jsonl` survive pod eviction;
+override with `REMOTE_ROOT`), points the config at the in-cluster URL,
 installs missing gems, preflights connectivity to `web`, and launches the rake task
 detached (with a PID lock to avoid duplicate launches). It needs `kubectl`; on macOS
 install `coreutils` for `gtimeout` (optional).
@@ -36,3 +37,23 @@ The stock image ships an empty `GEM_HOME=/opt/openstudio/gems`. The submit scrip
 installs `rubyzip`, `openstudio-analysis` and `openstudio-aws` there; to do it by hand,
 copy `scripts/install_jump_pod_gems.sh` into the pod and run it. Installed gems do not
 survive pod recreation; use a prebuilt image to avoid reinstalling.
+
+## Resilience to pod eviction
+
+- State lives on the PVC, not the `/outputs` emptyDir (now capped by
+  `jump_pod.outputsSizeLimit`). `jump_pod.resources` sets `ephemeral-storage`
+  requests/limits so the pod fails predictably instead of being the first eviction candidate.
+- Re-running `submit_from_jump_pod.sh` after an eviction is safe: it merges the manifest and
+  `submitted/` into `<REMOTE_ROOT>.state` before re-staging (aborting if that save fails),
+  refuses to restage while the rake task is still running (`FORCE_RESTAGE=1` overrides),
+  deletes empty stub analyses (0 data points, not running, older than `STUB_MIN_AGE`
+  seconds, default 900, and named `<project>...Batch<N>`), and moves batches the server
+  already has into `outputs/<project>/submitted/`, so only missing batches are submitted.
+  If an empty analysis is still young or running, reconcile aborts instead of deleting it; retry later.
+- `REMOTE_ROOT` must be a subdirectory of `PVC_ROOT` (default `/mnt/openstudio`).
+  If several jump pods are running, set `JUMP_POD_RELEASE=<helm release>`.
+- `CHECK_ONLY=1 scripts/submit_from_jump_pod.sh <gem> [task]` is read-only (uses the already-staged
+  project; nothing is copied or deleted). It prints expected vs created batch counts and exits
+  non-zero with `MISSING_BATCHES: ...` and/or `EMPTY_ANALYSES: ...` if any batch is missing or
+  has an empty analysis.
+- Per-batch rescue and write-before/after manifest entries belong in the gem (`create_osa.rb`) and are not handled here.

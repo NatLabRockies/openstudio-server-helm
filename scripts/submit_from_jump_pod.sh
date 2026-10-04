@@ -6,9 +6,10 @@
 # Requires jump_pod.enabled=true (helm --set jump_pod.enabled=true).
 #
 # What this does:
-#   1. Packs a minimal copy of the gem project (skips vendored .bundle gems,
+#   1. Packs a minimal copy of the gem project (skips vendored .bundle gems, .venv,
+#      measure test output,
 #      old outputs/, spec/integration, tmp, sweep_results, SR1, notebook)
-#   2. Copies it into the jump pod under /outputs/bem-to-surrogate
+#   2. Copies it into the jump pod under /mnt/openstudio/bem-to-surrogate (PVC)
 #   3. Rewrites the *copy's* configs.yml to use the in-cluster server URL
 #      and the openstudio_meta CLI already baked into the pod image
 #   4. Installs any missing gem deps (image ships most of them already),
@@ -24,6 +25,10 @@
 #
 # Env overrides: NAMESPACE, JUMP_POD_LABEL, IN_CLUSTER_SERVER_URI,
 #                OS_META_PATH, REMOTE_ROOT, SKIP_COPY, SKIP_BUNDLE,
+#                CHECK_ONLY (1 = read-only: report expected vs created batches
+#                using the already-staged project; nothing is copied or deleted),
+#                PVC_ROOT, FORCE_RESTAGE (1 = restage even if rake is running),
+#                JUMP_POD_RELEASE (Helm release label to select the pod),
 #                RELOCK_ON_FAILURE (1 = last-resort full lockfile re-resolve)
 
 set -euo pipefail
@@ -43,7 +48,23 @@ IN_CLUSTER_SERVER_URI="${IN_CLUSTER_SERVER_URI:-http://web}"
 OS_META_PATH="${OS_META_PATH:-/opt/openstudio/bin/openstudio_meta}"
 # openstudio_meta forces this GEM_HOME internally; its gems must live here.
 META_GEM_HOME="${META_GEM_HOME:-/opt/openstudio/gems}"
-REMOTE_ROOT="${REMOTE_ROOT:-/outputs/bem-to-surrogate}"
+# Default to the NFS PVC (/mnt/openstudio) so the staged repo, log, PID lock and
+# submit manifest survive pod eviction/recreation (/outputs is an emptyDir).
+REMOTE_ROOT="${REMOTE_ROOT:-/mnt/openstudio/bem-to-surrogate}"
+PVC_ROOT="${PVC_ROOT:-/mnt/openstudio}"
+# REMOTE_ROOT is wiped on re-stage; it must be a strict descendant of the PVC so the
+# wipe can't hit unrelated data and the sibling STATE_DIR stays on durable storage.
+REMOTE_ROOT="${REMOTE_ROOT%/}"
+case "$REMOTE_ROOT" in
+  "${PVC_ROOT}"/?*) ;;
+  *) echo "REMOTE_ROOT (${REMOTE_ROOT}) must be a subdirectory of ${PVC_ROOT}" >&2; exit 1 ;;
+esac
+case "$REMOTE_ROOT" in
+  *..*|*[[:space:]\'\"]*) echo "REMOTE_ROOT contains unsupported characters" >&2; exit 1 ;;
+esac
+STATE_DIR="${REMOTE_ROOT}.state"   # survives the re-stage wipe of REMOTE_ROOT
+FORCE_RESTAGE="${FORCE_RESTAGE:-0}" # 1 = restage even if a submission is still running
+CHECK_ONLY="${CHECK_ONLY:-0}"      # 1 = only compare expected vs created batches
 CHUNK_SIZE="${CHUNK_SIZE:-100m}"   # split size for the resilient copy
 MAX_RETRIES="${MAX_RETRIES:-6}"    # retries per chunk/command before giving up
 SKIP_COPY="${SKIP_COPY:-0}"        # 1 = reuse project already staged in the pod
@@ -97,9 +118,19 @@ BATCH_COUNT="$(find "$PROJECT_DIR" -maxdepth 1 -name 'parametric_space*.json' | 
 echo "=== Project '${PROJECT_NAME}': ${BATCH_COUNT} parametric_space batch file(s) ==="
 
 get_jump_pod() {
-  local pod="" attempt=1 delay=5
+  local pod="" attempt=1 delay=5 selector="app=${JUMP_POD_LABEL}" pods n
+  [[ -n "${JUMP_POD_RELEASE:-}" ]] && selector="${selector},release=${JUMP_POD_RELEASE}"
   until [[ -n "$pod" ]]; do
-    pod="$(kubectl get pods -n "$NAMESPACE" -l app="$JUMP_POD_LABEL" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    # Only Running pods: an evicted pod lingers in Error state and sorts first.
+    pods="$(kubectl get pods -n "$NAMESPACE" -l "$selector" --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+    n="$(printf '%s\n' "$pods" | grep -c . || true)"
+    if (( n > 1 )); then
+      echo "Multiple running jump pods match '${selector}':" >&2
+      printf '%s\n' "$pods" | sed 's/^/  /' >&2
+      echo "Set JUMP_POD_RELEASE=<helm release> to disambiguate." >&2
+      return 0
+    fi
+    pod="$(printf '%s' "$pods" | head -1)"
     [[ -n "$pod" ]] && break
     if (( attempt >= MAX_RETRIES )); then
       break
@@ -200,14 +231,59 @@ EOF
 fi
 echo "  OK: jump-pod can reach ${IN_CLUSTER_SERVER_URI}"
 
+RECONCILE_RB="$(dirname "$0")/jump_pod_reconcile.rb"
+run_reconcile() {
+  kubectl exec -i -n "$NAMESPACE" "$POD" -- ruby - "$1" "$IN_CLUSTER_SERVER_URI" "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" "$PROJECT_NAME" < "$RECONCILE_RB"
+}
+if [[ "$CHECK_ONLY" == "1" ]]; then
+  echo "=== CHECK_ONLY=1: expected vs created batches (read-only, using staged project) ==="
+  retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- test -d "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" \
+    || { echo "No staged project at ${REMOTE_ROOT}; run without CHECK_ONLY first" >&2; exit 1; }
+  run_reconcile check
+  exit $?
+fi
+
+LOCK_FILE="${REMOTE_ROOT}/${RAKE_TASK}.log.pid"
 if [[ "$SKIP_COPY" == "1" ]]; then
   echo "=== SKIP_COPY=1: reusing project already staged at ${REMOTE_ROOT} ==="
   retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- test -f "${REMOTE_ROOT}/Rakefile" \
     || { echo "No staged project at ${REMOTE_ROOT}; rerun without SKIP_COPY=1" >&2; exit 1; }
 else
 
+# Restaging wipes REMOTE_ROOT (including the running task's log and lock), so refuse
+# if the rake task is still alive.
+if [[ "$FORCE_RESTAGE" != "1" ]]; then
+  LIVE_PID="$(retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c '
+    PID=$(cat "$1" 2>/dev/null); [ -n "$PID" ] && ps -p "$PID" -o pid= 2>/dev/null | grep -q . && echo "$PID"; true' _ "$LOCK_FILE" | tr -d ' \r')"
+  if [[ -n "$LIVE_PID" ]]; then
+    echo "rake ${RAKE_TASK} is still running in the pod (PID ${LIVE_PID}); restaging would wipe ${REMOTE_ROOT}." >&2
+    echo "Use CHECK_ONLY=1 to inspect, SKIP_COPY=1 to reuse the stage, or FORCE_RESTAGE=1 to override." >&2
+    exit 1
+  fi
+fi
+
 REMOTE_TMP="/tmp/bem_to_surrogate_chunks"
 echo "=== Preparing remote directories ==="
+# Keep the submit manifest and already-submitted batch files across a re-stage
+# so a rerun after eviction resumes instead of starting from zero. Merge-copy
+# (never delete saved state first) and fail hard: the wipe below must not run
+# unless the state is safely saved.
+retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "
+set -e
+mkdir -p '${STATE_DIR}'
+P='${REMOTE_ROOT}/outputs/${PROJECT_NAME}'
+if [ -f \"\$P/osa_submit_manifest.jsonl\" ]; then
+  cp -f \"\$P/osa_submit_manifest.jsonl\" '${STATE_DIR}/osa_submit_manifest.jsonl.tmp'
+  mv -f '${STATE_DIR}/osa_submit_manifest.jsonl.tmp' '${STATE_DIR}/osa_submit_manifest.jsonl'
+fi
+if [ -d \"\$P/submitted\" ]; then
+  mkdir -p '${STATE_DIR}/submitted'
+  cp -a \"\$P/submitted/.\" '${STATE_DIR}/submitted/'
+fi
+" || { echo "Failed to save submit state to ${STATE_DIR}; not wiping ${REMOTE_ROOT}" >&2; exit 1; }
+# rm can fail on NFS ".nfsXXXX" files held open by a still-running process from an
+# interrupted earlier run; stop those first, then wipe.
+kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'pkill -f "tar -xzf /tmp/bem_to_surrogate_chunks" 2>/dev/null; pkill -f "cat /tmp/bem_to_surrogate_chunks" 2>/dev/null; sleep 1; true' || true
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT" "$REMOTE_TMP"
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- mkdir -p "$REMOTE_ROOT" "$REMOTE_TMP"
 
@@ -238,6 +314,8 @@ echo "=== Packing repo (excluding .bundle, outputs, spec/integration, tmp, sweep
 REPO_TARBALL="$(mktemp -t bem_to_surrogate_XXXX).tar.gz"
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$REPO_TARBALL" -C "$GEM_DIR" \
   --exclude='.bundle' --exclude='outputs' --exclude='spec/integration' \
+  --exclude='.venv' --exclude='venv' --exclude='__pycache__' --exclude='*.pyc' \
+  --exclude='*/tests/output' --exclude='*/tests/run' --exclude='node_modules' \
   --exclude='tmp' --exclude='sweep_results' --exclude='SR1' --exclude='notebook' \
   --exclude='.git' --exclude='.DS_Store' .
 copy_tarball_to_pod "$REPO_TARBALL" repo
@@ -252,6 +330,19 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$PROJ_TARBALL" -C "$GEM_DIR" \
 copy_tarball_to_pod "$PROJ_TARBALL" proj
 
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_TMP"
+# Restore saved state into the fresh stage.
+retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "
+set -e
+P='${REMOTE_ROOT}/outputs/${PROJECT_NAME}'
+mkdir -p \"\$P\"
+if [ -f '${STATE_DIR}/osa_submit_manifest.jsonl' ]; then
+  cp -f '${STATE_DIR}/osa_submit_manifest.jsonl' \"\$P/\"
+fi
+if [ -d '${STATE_DIR}/submitted' ]; then
+  mkdir -p \"\$P/submitted\"
+  cp -a '${STATE_DIR}/submitted/.' \"\$P/submitted/\"
+fi
+"
 fi
 
 echo "=== Preparing project in pod (strip macOS cruft, git init, outputs dir) ==="
@@ -386,15 +477,16 @@ retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
   "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext && bundle exec rake -T > /dev/null" \
   || { echo "Rakefile failed to load in pod" >&2; exit 1; }
 
-# Measure 4: Manifest verification — skip launch if complete manifest exists.
-MANIFEST_FILE="${REMOTE_ROOT}/outputs/${PROJECT_NAME}/osa_submit_manifest.jsonl"
-MANIFEST_OK="$(kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'if [ -f \"'"'${MANIFEST_FILE}'"'\" ]; then echo yes; else echo no; fi' 2>/dev/null || echo "no")"
-if [[ "$MANIFEST_OK" == "yes" ]]; then
-  MANIFEST_BATCHES="$(kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'cat \"'"'${MANIFEST_FILE}'"'\" 2>/dev/null | wc -l' 2>/dev/null || echo "0")"
-  if [[ -n "$MANIFEST_BATCHES" && "$MANIFEST_BATCHES" -ge "$BATCH_COUNT" ]]; then
-    echo "=== Prior complete submission manifest found (${MANIFEST_BATCHES} batches >= ${BATCH_COUNT}) — not relaunching ==="
-    exit 0
-  fi
+# Resume support: delete empty stub analyses and hide batches the server already
+# has, so the rake task only submits what is missing (no duplicates).
+echo "=== Reconciling with server (skip completed batches, remove empty stubs) ==="
+run_reconcile reconcile || { echo "FATAL: reconcile failed; refusing to submit (would risk duplicates)" >&2; exit 1; }
+
+# Completion is decided by the server (reconcile above), not the manifest line count.
+REMAINING="$(kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'ls "$1"/parametric_space*Batch*.json 2>/dev/null | wc -l' _ "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" | tr -d ' \r')"
+if [[ "$REMAINING" == "0" ]]; then
+  echo "=== All ${BATCH_COUNT} batches already on the server — nothing to submit ==="
+  exit 0
 fi
 
 LOG_FILE="${REMOTE_ROOT}/${RAKE_TASK}.log"
@@ -437,7 +529,8 @@ for attempt in $(seq 1 "$MAX_RETRIES"); do
     LAUNCHED=1
     break
   elif echo "$LOCK_STATUS" | grep -q '^stale:'; then
-    echo "  (stale PID lock ${LOCK_FILE} cleaned; will try launch)"
+    echo "  (stale PID lock ${LOCK_FILE} cleaned; archiving old log and trying launch)"
+    kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'mv -f "$1" "$1.$(date +%s).old" 2>/dev/null || true' _ "$LOG_FILE" || true
   fi
   if with_timeout 30 kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
     "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext && (setsid nohup bundle exec rake ${RAKE_TASK} > '${LOG_FILE}' 2>&1 < /dev/null & echo \$! > '${LOCK_FILE}') ; echo started" \
@@ -530,6 +623,10 @@ Tail progress:
 
 Check if it's still running:
   kubectl exec -n ${NAMESPACE} ${POD} -- pgrep -fal rake
+
+Verify expected vs created batches (non-zero exit + missing list if incomplete);
+safe to rerun this script after a pod eviction -- it resumes where it stopped:
+  CHECK_ONLY=1 $0 ${GEM_DIR} ${RAKE_TASK}
 
 Pull results back to your machine when done:
   kubectl cp ${NAMESPACE}/${POD}:${REMOTE_ROOT}/outputs ${GEM_DIR}/outputs_from_jump_pod
