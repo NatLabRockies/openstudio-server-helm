@@ -51,6 +51,11 @@ rescue ArgumentError
   nil
 end
 
+# Full batch id as used in analysis names, e.g. "Batch6593_proposed_training".
+def batch_id_of(f)
+  File.basename(f)[/(Batch_?\d+[A-Za-z0-9_]*?)\.json\z/i, 1]
+end
+
 def batch_of(f)
   File.basename(f)[/Batch_?(\d+)(?!\d)/i, 1]&.to_i
 end
@@ -64,15 +69,21 @@ expected = {}
 end
 abort "No parametric_space batch files found in #{dir}" if expected.empty?
 
+# The server names analyses "<BatchId>_<UTC timestamp>" without the project name, so also match
+# on the exact full batch id (number + suffix) followed by that timestamp.
+batch_ids = expected.each_with_object({}) { |(n, f), h| (id = batch_id_of(f)) && h[id.downcase] = n }
+id_re = /(?<![A-Za-z0-9])(Batch_?\d+[A-Za-z0-9_]*?)_\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_UTC(?![A-Za-z0-9])/i
+
 analyses = http_json('get', "#{base}/analyses.json") || []
 proj_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}(?![A-Za-z0-9])/
 strict_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}[\s_.:\-]*(?:parametric_space|measure_space)?[\s_.:\-]*Batch_?\d+(?![A-Za-z0-9])/i
 by_batch = Hash.new { |h, k| h[k] = [] }
 analyses.each do |a|
   label = [a['name'], a['display_name']].compact.join(' ')
-  next unless label =~ proj_re
-  n = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
-  by_batch[n.to_i] << [a, label =~ strict_re ? true : false] if n
+  by_id = (m = label.match(id_re)) && batch_ids[m[1].downcase]
+  next unless label =~ proj_re || by_id
+  n = by_id || label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
+  by_batch[n.to_i] << [a, (label =~ strict_re || by_id) ? true : false] if n
 end
 
 done = []
