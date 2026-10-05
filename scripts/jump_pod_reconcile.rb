@@ -56,6 +56,12 @@ def batch_id_of(f)
   File.basename(f)[/(Batch_?\d+[A-Za-z0-9_]*?)\.json\z/i, 1]
 end
 
+# Reconciliation key: the full batch id (so Batch123 and Batch123_x stay distinct).
+def key_of(f)
+  id = batch_id_of(f)
+  id ? id.downcase.sub(/\Abatch_?/, 'batch') : nil
+end
+
 def batch_of(f)
   File.basename(f)[/Batch_?(\d+)(?!\d)/i, 1]&.to_i
 end
@@ -63,15 +69,15 @@ end
 expected = {}
 [dir, File.join(dir, 'submitted')].each do |d|
   Dir.glob(File.join(d, 'parametric_space*Batch*.json')).each do |f|
-    n = batch_of(f)
-    expected[n] = f if n
+    k = key_of(f)
+    expected[k] = f if k
   end
 end
 abort "No parametric_space batch files found in #{dir}" if expected.empty?
 
 # The server names analyses "<BatchId>_<UTC timestamp>" without the project name, so also match
 # on the exact full batch id (number + suffix) followed by that timestamp.
-batch_ids = expected.each_with_object({}) { |(n, f), h| (id = batch_id_of(f)) && h[id.downcase] = n }
+by_number = expected.keys.group_by { |k| k[/\d+/].to_i }
 id_re = /(?<![A-Za-z0-9])(Batch_?\d+[A-Za-z0-9_]*?)_\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_UTC(?![A-Za-z0-9])/i
 
 analyses = http_json('get', "#{base}/analyses.json") || []
@@ -80,10 +86,16 @@ strict_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}[\s_.:\-]*(?:parametric_sp
 by_batch = Hash.new { |h, k| h[k] = [] }
 analyses.each do |a|
   label = [a['name'], a['display_name']].compact.join(' ')
-  by_id = (m = label.match(id_re)) && batch_ids[m[1].downcase]
+  m = label.match(id_re)
+  by_id = m && (k = m[1].downcase.sub(/\Abatch_?/, 'batch')) && expected.key?(k) ? k : nil
   next unless label =~ proj_re || by_id
-  n = by_id || label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
-  by_batch[n.to_i] << [a, (label =~ strict_re || by_id) ? true : false] if n
+  key = by_id
+  unless key
+    num = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
+    cands = num && by_number[num.to_i]
+    key = cands.first if cands && cands.size == 1 # ambiguous numbers are never matched
+  end
+  by_batch[key] << [a, (label =~ strict_re || by_id) ? true : false] if key
 end
 
 done = []
@@ -118,7 +130,7 @@ if mode == 'reconcile'
   end
   stubs.each do |n, a, strict|
     unless strict
-      puts "NOT deleting empty analysis #{a['_id']} (batch #{n}): name does not match '#{project}' + Batch#{n} exactly"
+      puts "NOT deleting empty analysis #{a['_id']} (batch #{n}): name does not match '#{project}' + #{n} exactly"
       next
     end
     puts "deleting empty stub analysis #{a['_id']} (batch #{n})"
@@ -127,7 +139,7 @@ if mode == 'reconcile'
   FileUtils.mkdir_p(File.join(dir, 'submitted'))
   done_batches.each do |n|
     Dir.glob(File.join(dir, '{parametric_space,measure_space}*Batch*.json')).each do |f|
-      next unless batch_of(f) == n
+      next unless key_of(f) == n
       dest = File.join(dir, 'submitted', File.basename(f))
       File.exist?(dest) ? FileUtils.rm_f(f) : FileUtils.mv(f, dest)
     end

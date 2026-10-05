@@ -506,7 +506,11 @@ retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
 # moving their definitions to skipped/ so neither reconcile nor rake sees them.
 if [[ -n "${SKIP_BATCH_RANGES:-}" ]]; then
   echo "=== Skipping batch ranges: ${SKIP_BATCH_RANGES} ==="
-  [[ "$SKIP_BATCH_RANGES" =~ ^[0-9[:space:]-]+$ ]] || { echo "SKIP_BATCH_RANGES must look like '6785-6912 7000-7010'" >&2; exit 1; }
+  for _r in $SKIP_BATCH_RANGES; do
+    if [[ ! "$_r" =~ ^[0-9]+(-[0-9]+)?$ ]] || { [[ "$_r" == *-* ]] && (( 10#${_r%-*} > 10#${_r#*-} )); }; then
+      echo "Invalid SKIP_BATCH_RANGES entry '$_r' (expected N or N-M with N<=M, e.g. '6785-6912 7000-7010')" >&2; exit 1
+    fi
+  done
   kubectl exec -n "$NAMESPACE" "$POD" -- ruby -e '
     require "fileutils"; dir = ARGV.shift; ranges = ARGV.map { |r| a, b = r.split("-").map(&:to_i); (a..(b || a)) }
     FileUtils.mkdir_p(File.join(dir, "skipped"))

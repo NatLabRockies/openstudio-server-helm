@@ -105,12 +105,18 @@ if [[ -n "${WEB_POD:-}" ]]; then
   kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'nohup sh -c "rm -rf /mnt/openstudio/server/assets/data_points 2>/dev/null; rm -rf /mnt/openstudio/server/assets/* 2>/dev/null; rm -rf /mnt/openstudio/server/* 2>/dev/null; mkdir -p /mnt/openstudio/server/assets /mnt/openstudio/server/R; chmod 2777 /mnt/openstudio/server /mnt/openstudio/server/assets /mnt/openstudio/server/R" > /dev/null 2>&1 </dev/null &'
   # The deletion above is backgrounded; wait for it so it cannot race new submissions.
   echo "Waiting for background NFS cleanup to finish..."
+  bg_done=0
   for _ in $(seq 1 180); do
     if kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'ps -eo args | grep -q "[r]m -rf /mnt/openstudio/server" && exit 1; test -d /mnt/openstudio/server/R && test -d /mnt/openstudio/server/assets' >/dev/null 2>&1; then
+      bg_done=1
       break
     fi
     sleep 5
   done
+  if [[ "$bg_done" != 1 ]]; then
+    echo "ERROR: background NFS cleanup did not finish within 15 minutes; aborting before Mongo/Redis cleanup." >&2
+    exit 1
+  fi
   # Rails runs as nobody and must be able to recreate assets/ subfolders on upload.
   # server/R is only created at server-image startup; Rserve writes LHS sample plots there and
   # every LHS analysis fails with 0 datapoints if it is missing.

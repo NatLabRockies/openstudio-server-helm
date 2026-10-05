@@ -1,7 +1,7 @@
 {{- /* Render unless an unrelated copy exists. If this release already owns it, it must keep
 rendering, otherwise helm treats it as removed from the manifest and deletes it on upgrade. */ -}}
 {{- $existing := lookup "scheduling.k8s.io/v1" "PriorityClass" "" "low-priority" -}}
-{{- if or (not $existing) (eq (dig "metadata" "annotations" "meta.helm.sh/release-name" "" $existing) .Release.Name) }}
+{{- if or (not $existing) (and (eq (dig "metadata" "annotations" "meta.helm.sh/release-name" "" $existing) .Release.Name) (eq (dig "metadata" "annotations" "meta.helm.sh/release-namespace" "" $existing) .Release.Namespace)) }}
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
