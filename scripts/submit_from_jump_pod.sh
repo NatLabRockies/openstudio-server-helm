@@ -30,6 +30,7 @@
 #                PVC_ROOT, FORCE_RESTAGE (1 = restage even if rake is running),
 #                JUMP_POD_RELEASE (Helm release label to select the pod),
 #                RELOCK_ON_FAILURE (1 = last-resort full lockfile re-resolve),
+#                SKIP_BATCH_RANGES (e.g. "6785-6912": never submit those batches),
 #                OSA_SUBMIT_CONCURRENCY (parallel run_analysis calls, default 4),
 #                OSA_CANARY (0 disables the per-measure-configuration canary that
 #                aborts submission if >OSA_CANARY_MAX_FAILURE_FRACTION (0.2) of the
@@ -500,6 +501,24 @@ echo "=== Verifying Rakefile + configs load under bundler ==="
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
   "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext && bundle exec rake -T > /dev/null" \
   || { echo "Rakefile failed to load in pod" >&2; exit 1; }
+
+# Optional: exclude batch ranges (e.g. SKIP_BATCH_RANGES="6785-6912 7000-7010") by
+# moving their definitions to skipped/ so neither reconcile nor rake sees them.
+if [[ -n "${SKIP_BATCH_RANGES:-}" ]]; then
+  echo "=== Skipping batch ranges: ${SKIP_BATCH_RANGES} ==="
+  [[ "$SKIP_BATCH_RANGES" =~ ^[0-9[:space:]-]+$ ]] || { echo "SKIP_BATCH_RANGES must look like '6785-6912 7000-7010'" >&2; exit 1; }
+  kubectl exec -n "$NAMESPACE" "$POD" -- ruby -e '
+    require "fileutils"; dir = ARGV.shift; ranges = ARGV.map { |r| a, b = r.split("-").map(&:to_i); (a..(b || a)) }
+    FileUtils.mkdir_p(File.join(dir, "skipped"))
+    n = 0
+    Dir.glob(File.join(dir, "{parametric_space,measure_space}*Batch*.json")).each do |f|
+      b = File.basename(f)[/Batch_?(\d+)/i, 1].to_i
+      next unless ranges.any? { |r| r.cover?(b) }
+      FileUtils.mv(f, File.join(dir, "skipped", File.basename(f))); n += 1
+    end
+    puts "moved #{n} batch definition files to skipped/"
+  ' "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" $SKIP_BATCH_RANGES
+fi
 
 # Resume support: delete empty stub analyses and hide batches the server already
 # has, so the rake task only submits what is missing (no duplicates).
