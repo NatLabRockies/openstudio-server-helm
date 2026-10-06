@@ -29,7 +29,13 @@
 #                using the already-staged project; nothing is copied or deleted),
 #                PVC_ROOT, FORCE_RESTAGE (1 = restage even if rake is running),
 #                JUMP_POD_RELEASE (Helm release label to select the pod),
-#                RELOCK_ON_FAILURE (1 = last-resort full lockfile re-resolve)
+#                RELOCK_ON_FAILURE (1 = last-resort full lockfile re-resolve),
+#                SKIP_BATCH_RANGES (e.g. "6785-6912": never submit those batches),
+#                OSA_SUBMIT_CONCURRENCY (parallel run_analysis calls, default 4),
+#                OSA_CANARY (0 disables the per-measure-configuration canary that
+#                aborts submission if >OSA_CANARY_MAX_FAILURE_FRACTION (0.2) of the
+#                first finished datapoints of a new configuration fail),
+#                OSA_CANARY_MIN_COMPLETED (20), OSA_CANARY_TIMEOUT_SECONDS (1800)
 
 set -euo pipefail
 
@@ -66,6 +72,11 @@ STATE_DIR="${REMOTE_ROOT}.state"   # survives the re-stage wipe of REMOTE_ROOT
 FORCE_RESTAGE="${FORCE_RESTAGE:-0}" # 1 = restage even if a submission is still running
 CHECK_ONLY="${CHECK_ONLY:-0}"      # 1 = only compare expected vs created batches
 CHUNK_SIZE="${CHUNK_SIZE:-100m}"   # split size for the resilient copy
+OSA_SUBMIT_CONCURRENCY="${OSA_SUBMIT_CONCURRENCY:-4}"
+OSA_CANARY="${OSA_CANARY:-1}"
+OSA_CANARY_MIN_COMPLETED="${OSA_CANARY_MIN_COMPLETED:-20}"
+OSA_CANARY_MAX_FAILURE_FRACTION="${OSA_CANARY_MAX_FAILURE_FRACTION:-0.2}"
+OSA_CANARY_TIMEOUT_SECONDS="${OSA_CANARY_TIMEOUT_SECONDS:-1800}"
 MAX_RETRIES="${MAX_RETRIES:-6}"    # retries per chunk/command before giving up
 SKIP_COPY="${SKIP_COPY:-0}"        # 1 = reuse project already staged in the pod
 SKIP_BUNDLE="${SKIP_BUNDLE:-0}"    # 1 = skip bundle install (already done)
@@ -149,6 +160,20 @@ if [[ -z "$POD" ]]; then
   exit 1
 fi
 echo "=== Using jump pod: ${POD} ==="
+
+# Preflight: a stale NFS mount on web-background/rserve (e.g. after the NFS pod was
+# preempted/restarted) makes every analysis complete with 0 datapoints, silently.
+echo "=== Preflight: PriorityClasses and NFS clients ==="
+# shellcheck source=lib/nfs_health.sh
+source "$(dirname "$0")/lib/nfs_health.sh"
+check_priority_classes || { echo "Recreate the PriorityClasses (helm upgrade) and rerun." >&2; exit 1; }
+ensure_nfs_clients_healthy || { echo "Fix the NFS clients above before submitting." >&2; exit 1; }
+nfs_ok_jump=0
+kubectl exec -n "$NAMESPACE" "$POD" -- ls /mnt/openstudio >/dev/null 2>&1 && nfs_ok_jump=1
+if [[ "$nfs_ok_jump" != 1 ]]; then
+  echo "ERROR: jump pod ${POD} cannot access /mnt/openstudio (stale NFS?). Delete the pod to remount, then rerun." >&2
+  exit 1
+fi
 
 # Preflight: confirm jump-pod can actually reach the web service over the
 # cluster pod network *before* spending minutes packing/copying/bundling.
@@ -477,6 +502,28 @@ retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
   "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext && bundle exec rake -T > /dev/null" \
   || { echo "Rakefile failed to load in pod" >&2; exit 1; }
 
+# Optional: exclude batch ranges (e.g. SKIP_BATCH_RANGES="6785-6912 7000-7010") by
+# moving their definitions to skipped/ so neither reconcile nor rake sees them.
+if [[ -n "${SKIP_BATCH_RANGES:-}" ]]; then
+  echo "=== Skipping batch ranges: ${SKIP_BATCH_RANGES} ==="
+  for _r in $SKIP_BATCH_RANGES; do
+    if [[ ! "$_r" =~ ^[0-9]+(-[0-9]+)?$ ]] || { [[ "$_r" == *-* ]] && (( 10#${_r%-*} > 10#${_r#*-} )); }; then
+      echo "Invalid SKIP_BATCH_RANGES entry '$_r' (expected N or N-M with N<=M, e.g. '6785-6912 7000-7010')" >&2; exit 1
+    fi
+  done
+  kubectl exec -n "$NAMESPACE" "$POD" -- ruby -e '
+    require "fileutils"; dir = ARGV.shift; ranges = ARGV.map { |r| a, b = r.split("-").map(&:to_i); (a..(b || a)) }
+    FileUtils.mkdir_p(File.join(dir, "skipped"))
+    n = 0
+    Dir.glob(File.join(dir, "{parametric_space,measure_space}*Batch*.json")).each do |f|
+      b = File.basename(f)[/Batch_?(\d+)/i, 1].to_i
+      next unless ranges.any? { |r| r.cover?(b) }
+      FileUtils.mv(f, File.join(dir, "skipped", File.basename(f))); n += 1
+    end
+    puts "moved #{n} batch definition files to skipped/"
+  ' "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" $SKIP_BATCH_RANGES
+fi
+
 # Resume support: delete empty stub analyses and hide batches the server already
 # has, so the rake task only submits what is missing (no duplicates).
 echo "=== Reconciling with server (skip completed batches, remove empty stubs) ==="
@@ -533,7 +580,7 @@ for attempt in $(seq 1 "$MAX_RETRIES"); do
     kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'mv -f "$1" "$1.$(date +%s).old" 2>/dev/null || true' _ "$LOG_FILE" || true
   fi
   if with_timeout 30 kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
-    "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext && (setsid nohup bundle exec rake ${RAKE_TASK} > '${LOG_FILE}' 2>&1 < /dev/null & echo \$! > '${LOCK_FILE}') ; echo started" \
+    "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext OSA_SUBMIT_CONCURRENCY='${OSA_SUBMIT_CONCURRENCY}' OSA_CANARY='${OSA_CANARY}' OSA_CANARY_MIN_COMPLETED='${OSA_CANARY_MIN_COMPLETED}' OSA_CANARY_MAX_FAILURE_FRACTION='${OSA_CANARY_MAX_FAILURE_FRACTION}' OSA_CANARY_TIMEOUT_SECONDS='${OSA_CANARY_TIMEOUT_SECONDS}' && (setsid nohup bundle exec rake ${RAKE_TASK} > '${LOG_FILE}' 2>&1 < /dev/null & echo \$! > '${LOCK_FILE}') ; echo started" \
     2>&1 | tee /dev/stderr | grep -q "^started$"; then
     LAUNCHED=1
     break

@@ -89,6 +89,10 @@ resources: {}
   #  cpu: 100m
   #  memory: 128Mi
 
+# Keep above the default priority so web/rserve pods can't preempt the NFS server
+# (a preemption restarts it and leaves every NFS client with stale file handles).
+priorityClassName: ""
+
 nodeSelector: {}
 
 tolerations: []
