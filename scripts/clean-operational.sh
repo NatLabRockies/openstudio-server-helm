@@ -101,20 +101,33 @@ if [[ -n "${WEB_POD:-}" ]]; then
   echo "Deleting contents (skipping .nfs files)..."
   kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'find /mnt/openstudio/log -mindepth 1 -not -name ".nfs*" -delete 2>/dev/null || true; echo "log done"'
   kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'find /mnt/openstudio/server/assets/analyses -maxdepth 3 -mindepth 3 -not -path "*.nfs*" -delete 2>/dev/null || true; echo "analyses done"'
-  # Background cleanup for large directories (data_points) to avoid timeout
-  kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'nohup sh -c "rm -rf /mnt/openstudio/server/assets/data_points 2>/dev/null; rm -rf /mnt/openstudio/server/assets/* 2>/dev/null; rm -rf /mnt/openstudio/server/* 2>/dev/null; mkdir -p /mnt/openstudio/server/assets /mnt/openstudio/server/R; chmod 2777 /mnt/openstudio/server /mnt/openstudio/server/assets /mnt/openstudio/server/R" > /dev/null 2>&1 </dev/null &'
+  # Background cleanup for large directories (data_points) to avoid exec timeouts.
+  # Per-datapoint dirs are removed in parallel (NFS unlink round trips make a single rm very slow).
+  # The NFS_CLEAN_JOB marker lets re-runs detect an already-running job instead of racing a second one.
+  NFS_CLEAN_TIMEOUT_MIN="${NFS_CLEAN_TIMEOUT_MIN:-60}"
+  NFS_RUNNING_CHECK='ps -eo args 2>/dev/null | grep -q "[N]FS_CLEAN_JOB"'
+  if kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c "$NFS_RUNNING_CHECK"; then
+    echo "NFS cleanup job already running in $WEB_POD; waiting for it instead of starting another."
+  else
+    kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'nohup sh -c "NFS_CLEAN_JOB=1; find /mnt/openstudio/server/assets -mindepth 2 -maxdepth 2 -print0 2>/dev/null | xargs -0 -r -n 20 -P 8 rm -rf; rm -rf /mnt/openstudio/server/assets/* /mnt/openstudio/server/* 2>/dev/null; mkdir -p /mnt/openstudio/server/assets /mnt/openstudio/server/R; chmod 2777 /mnt/openstudio/server /mnt/openstudio/server/assets /mnt/openstudio/server/R" > /dev/null 2>&1 </dev/null &'
+  fi
   # The deletion above is backgrounded; wait for it so it cannot race new submissions.
-  echo "Waiting for background NFS cleanup to finish..."
+  echo "Waiting for background NFS cleanup to finish (timeout ${NFS_CLEAN_TIMEOUT_MIN} min; set NFS_CLEAN_TIMEOUT_MIN to change)..."
   bg_done=0
-  for _ in $(seq 1 180); do
-    if kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c 'ps -eo args | grep -q "[r]m -rf /mnt/openstudio/server" && exit 1; test -d /mnt/openstudio/server/R && test -d /mnt/openstudio/server/assets' >/dev/null 2>&1; then
+  start_ts=$(date +%s)
+  deadline=$((start_ts + NFS_CLEAN_TIMEOUT_MIN * 60))
+  while (( $(date +%s) < deadline )); do
+    if kubectl exec -n "$NAMESPACE" "$WEB_POD" -c web -- sh -c "$NFS_RUNNING_CHECK && exit 1; test -d /mnt/openstudio/server/R && test -d /mnt/openstudio/server/assets" >/dev/null 2>&1; then
       bg_done=1
       break
     fi
-    sleep 5
+    echo "  ...still cleaning ($(( ($(date +%s) - start_ts) / 60 )) min elapsed)"
+    sleep 15
   done
   if [[ "$bg_done" != 1 ]]; then
-    echo "ERROR: background NFS cleanup did not finish within 15 minutes; aborting before Mongo/Redis cleanup." >&2
+    echo "ERROR: background NFS cleanup did not finish within ${NFS_CLEAN_TIMEOUT_MIN} minutes; aborting before Mongo/Redis cleanup." >&2
+    echo "The job keeps running in $WEB_POD. Re-run this script later (it will wait for the running job)," >&2
+    echo "or raise NFS_CLEAN_TIMEOUT_MIN." >&2
     exit 1
   fi
   # Rails runs as nobody and must be able to recreate assets/ subfolders on upload.
