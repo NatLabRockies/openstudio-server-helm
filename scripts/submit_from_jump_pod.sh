@@ -316,7 +316,7 @@ copy_tarball_to_pod() {
     "set -o pipefail; cat ${REMOTE_TMP}/${label}_* | tar -xzf - -C '${REMOTE_ROOT}' && rm -f ${REMOTE_TMP}/${label}_*"
 }
 
-echo "=== Packing repo (excluding .bundle, outputs, spec/integration, tmp, sweep_results, SR1, notebook, .git) ==="
+echo "=== Packing repo (excluding .bundle, outputs, spec/integration, tmp, tmp_analysis, sweep_results, SR1, notebook, .git) ==="
 # COPYFILE_DISABLE stops macOS tar from emitting AppleDouble "._*" resource
 # files, which otherwise litter the pod and confuse Dir globs.
 REPO_TARBALL="$(mktemp -t bem_to_surrogate_XXXX).tar.gz"
@@ -324,7 +324,7 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$REPO_TARBALL" -C "$GEM_DIR" \
   --exclude='.bundle' --exclude='outputs' --exclude='spec/integration' \
   --exclude='.venv' --exclude='venv' --exclude='__pycache__' --exclude='*.pyc' \
   --exclude='*/tests/output' --exclude='*/tests/run' --exclude='node_modules' \
-  --exclude='tmp' --exclude='sweep_results' --exclude='SR1' --exclude='notebook' \
+  --exclude='tmp' --exclude='tmp_analysis' --exclude='sweep_results' --exclude='SR1' --exclude='notebook' \
   --exclude='.git' --exclude='.DS_Store' .
 copy_tarball_to_pod "$REPO_TARBALL" repo
 
