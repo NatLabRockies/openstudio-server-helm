@@ -264,7 +264,12 @@ fi
 
 # Stage chunks on the PVC, not /tmp: pod ephemeral storage is capped (10Gi) and
 # exceeding it evicts the pod.
-REMOTE_TMP="${REMOTE_ROOT}.chunks"
+REMOTE_TMP="${REMOTE_ROOT}.chunks.$(date +%s).$$"
+# Best-effort remote cleanup on any exit so a failed run doesn't leave GBs on the PVC.
+cleanup_remote_tmp() {
+  kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_TMP" >/dev/null 2>&1 || true
+}
+trap cleanup_remote_tmp EXIT
 echo "=== Preparing remote directories ==="
 # Keep the submit manifest and already-submitted batch files across a re-stage
 # so a rerun after eviction resumes instead of starting from zero. Merge-copy
@@ -286,8 +291,8 @@ fi
 # rm can fail on NFS ".nfsXXXX" files held open by a still-running process from an
 # interrupted earlier run; stop those first, then wipe. The [c] keeps pkill from
 # matching (and SIGTERMing, exit 143) its own bash -c command line.
-kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "pkill -f '[c]at ${REMOTE_TMP}/' 2>/dev/null; sleep 1; true" || true
-retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT" "$REMOTE_TMP"
+kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "pkill -f '[c]at ${REMOTE_ROOT}.chunks' 2>/dev/null; sleep 1; true" || true
+retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT"
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- mkdir -p "$REMOTE_ROOT" "$REMOTE_TMP"
 
 # Split a tarball into chunks and copy each with retry, so one dropped
