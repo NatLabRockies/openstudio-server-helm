@@ -262,7 +262,14 @@ if [[ "$FORCE_RESTAGE" != "1" ]]; then
   fi
 fi
 
-REMOTE_TMP="/tmp/bem_to_surrogate_chunks"
+# Stage chunks on the PVC, not /tmp: pod ephemeral storage is capped (10Gi) and
+# exceeding it evicts the pod.
+REMOTE_TMP="${REMOTE_ROOT}.chunks.$(date +%s).$$"
+# Best-effort remote cleanup on any exit so a failed run doesn't leave GBs on the PVC.
+cleanup_remote_tmp() {
+  kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_TMP" >/dev/null 2>&1 || true
+}
+trap cleanup_remote_tmp EXIT
 echo "=== Preparing remote directories ==="
 # Keep the submit manifest and already-submitted batch files across a re-stage
 # so a rerun after eviction resumes instead of starting from zero. Merge-copy
@@ -282,9 +289,13 @@ if [ -d \"\$P/submitted\" ]; then
 fi
 " || { echo "Failed to save submit state to ${STATE_DIR}; not wiping ${REMOTE_ROOT}" >&2; exit 1; }
 # rm can fail on NFS ".nfsXXXX" files held open by a still-running process from an
-# interrupted earlier run; stop those first, then wipe.
-kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'pkill -f "tar -xzf /tmp/bem_to_surrogate_chunks" 2>/dev/null; pkill -f "cat /tmp/bem_to_surrogate_chunks" 2>/dev/null; sleep 1; true' || true
-retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT" "$REMOTE_TMP"
+# interrupted earlier run; stop those first, then wipe. The [c] keeps pkill from
+# matching (and SIGTERMing, exit 143) its own bash -c command line.
+kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "pkill -f '[c]at ${REMOTE_ROOT}.chunks' 2>/dev/null; sleep 1; true" || true
+retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT"
+# Drop chunk dirs orphaned by hard-killed/evicted earlier runs (older than 12h).
+kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
+  'find "$(dirname "$1")" -maxdepth 1 -name "$(basename "$1").chunks.*" -mmin +720 -exec rm -rf {} + 2>/dev/null; true' _ "$REMOTE_ROOT" || true
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- mkdir -p "$REMOTE_ROOT" "$REMOTE_TMP"
 
 # Split a tarball into chunks and copy each with retry, so one dropped
@@ -305,10 +316,10 @@ copy_tarball_to_pod() {
   done
   rm -rf "$chunk_dir"
   retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-    "cat ${REMOTE_TMP}/${label}_* > ${REMOTE_TMP}/${label}.tar.gz && tar -xzf ${REMOTE_TMP}/${label}.tar.gz -C '${REMOTE_ROOT}' && rm -f ${REMOTE_TMP}/${label}_* ${REMOTE_TMP}/${label}.tar.gz"
+    'set -o pipefail; cat "$1"/"$2"_* | tar -xzf - -C "$3" && rm -f "$1"/"$2"_*' _ "$REMOTE_TMP" "$label" "$REMOTE_ROOT"
 }
 
-echo "=== Packing repo (excluding .bundle, outputs, spec/integration, tmp, sweep_results, SR1, notebook, .git) ==="
+echo "=== Packing repo (excluding .bundle, outputs, spec/integration, tmp, tmp_analysis, sweep_results, SR1, notebook, .git) ==="
 # COPYFILE_DISABLE stops macOS tar from emitting AppleDouble "._*" resource
 # files, which otherwise litter the pod and confuse Dir globs.
 REPO_TARBALL="$(mktemp -t bem_to_surrogate_XXXX).tar.gz"
@@ -316,7 +327,7 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$REPO_TARBALL" -C "$GEM_DIR" \
   --exclude='.bundle' --exclude='outputs' --exclude='spec/integration' \
   --exclude='.venv' --exclude='venv' --exclude='__pycache__' --exclude='*.pyc' \
   --exclude='*/tests/output' --exclude='*/tests/run' --exclude='node_modules' \
-  --exclude='tmp' --exclude='sweep_results' --exclude='SR1' --exclude='notebook' \
+  --exclude='tmp' --exclude='tmp_analysis' --exclude='sweep_results' --exclude='SR1' --exclude='notebook' \
   --exclude='.git' --exclude='.DS_Store' .
 copy_tarball_to_pod "$REPO_TARBALL" repo
 
@@ -533,7 +544,7 @@ for attempt in $(seq 1 "$MAX_RETRIES"); do
     kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'mv -f "$1" "$1.$(date +%s).old" 2>/dev/null || true' _ "$LOG_FILE" || true
   fi
   if with_timeout 30 kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
-    "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext && (setsid nohup bundle exec rake ${RAKE_TASK} > '${LOG_FILE}' 2>&1 < /dev/null & echo \$! > '${LOCK_FILE}') ; echo started" \
+    "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext ALLOW_STALE='${ALLOW_STALE:-1}' && (setsid nohup bundle exec rake ${RAKE_TASK} > '${LOG_FILE}' 2>&1 < /dev/null & echo \$! > '${LOCK_FILE}') ; echo started" \
     2>&1 | tee /dev/stderr | grep -q "^started$"; then
     LAUNCHED=1
     break
@@ -563,6 +574,13 @@ fi
 
 echo "=== Confirming the process is alive ==="
 sleep 15
+# Prints alive/dead for the PID in the lock file; prints nothing if the exec itself
+# failed (inconclusive, so callers must not treat it as "dead").
+rake_state() {
+  kubectl exec -n "$NAMESPACE" "$POD" -- bash -c '
+    PID=$(cat "$1" 2>/dev/null)
+    if [ -n "$PID" ] && ps -p "$PID" -o pid= 2>/dev/null | grep -q .; then echo alive; else echo dead; fi' _ "$LOCK_FILE" 2>/dev/null | tr -d ' \r'
+}
 if retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- pgrep -f "rake ${RAKE_TASK}" > /dev/null 2>&1; then
   # Measure 3 + 6: Count processes; kill duplicates if more than one.
   PROCESS_COUNT="$(kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'echo $(pgrep -f "rake '${RAKE_TASK}'" | wc -l | tr -d " ")' 2>/dev/null || echo "0")"
@@ -583,9 +601,10 @@ if retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- pgrep -f "rake ${RAKE_TA
   fi
   echo "OK: rake ${RAKE_TASK} is running in ${POD}."
 else
-  echo "WARNING: no rake process detected. It either finished instantly or crashed." >&2
+  echo "ERROR: no rake process detected. It exited right after launch (crashed or aborted)." >&2
   echo "--- last 40 log lines ---" >&2
   retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- tail -40 "$LOG_FILE" >&2 || true
+  exit 1
 fi
 
 # Second-layer verification: the rake process being alive only proves the
@@ -598,10 +617,25 @@ echo "=== Watching for first submission activity (up to 2 min) ==="
 SUBMIT_SEEN=0
 for i in $(seq 1 12); do
   sleep 10
-  if retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-    "grep -qEi 'analysis|osa|submit|project' '${LOG_FILE}' 2>/dev/null"; then
+  # Plain kubectl, not retry_kubectl: grep exiting 1 just means "no match yet",
+  # and retrying it with backoff turned a 2 min watch into ~30 min.
+  if kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
+    "grep -qEi 'analysis|osa|submit|project' '${LOG_FILE}' 2>/dev/null" 2>/dev/null; then
     SUBMIT_SEEN=1
     break
+  fi
+  # A task that died after launch (e.g. aborted pre-submit check) must fail the
+  # script instead of being reported as submitted. A failed exec is inconclusive.
+  if [[ "$(rake_state)" == "dead" ]]; then
+    if kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
+      "grep -qEi 'analysis|osa|submit|project' '${LOG_FILE}' 2>/dev/null" 2>/dev/null; then
+      SUBMIT_SEEN=1   # finished quickly after submitting
+      break
+    fi
+    echo "ERROR: rake ${RAKE_TASK} exited before any submission activity." >&2
+    echo "--- last 40 log lines ---" >&2
+    kubectl exec -n "$NAMESPACE" "$POD" -- tail -40 "$LOG_FILE" >&2 || true
+    exit 1
   fi
 done
 if [[ "$SUBMIT_SEEN" == "1" ]]; then
