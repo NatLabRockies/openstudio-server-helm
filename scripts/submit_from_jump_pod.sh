@@ -591,9 +591,10 @@ if retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- pgrep -f "rake ${RAKE_TA
   fi
   echo "OK: rake ${RAKE_TASK} is running in ${POD}."
 else
-  echo "WARNING: no rake process detected. It either finished instantly or crashed." >&2
+  echo "ERROR: no rake process detected. It exited right after launch (crashed or aborted)." >&2
   echo "--- last 40 log lines ---" >&2
   retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- tail -40 "$LOG_FILE" >&2 || true
+  exit 1
 fi
 
 # Second-layer verification: the rake process being alive only proves the
@@ -612,6 +613,16 @@ for i in $(seq 1 12); do
     "grep -qEi 'analysis|osa|submit|project' '${LOG_FILE}' 2>/dev/null" 2>/dev/null; then
     SUBMIT_SEEN=1
     break
+  fi
+  # A task that died after launch (e.g. aborted pre-submit check) must fail the
+  # script instead of being reported as submitted.
+  if ! kubectl exec -n "$NAMESPACE" "$POD" -- pgrep -f "rake ${RAKE_TASK}" >/dev/null 2>&1; then
+    if kubectl exec -n "$NAMESPACE" "$POD" -- test -d "${REMOTE_ROOT}" >/dev/null 2>&1; then
+      echo "ERROR: rake ${RAKE_TASK} exited before any submission activity." >&2
+      echo "--- last 40 log lines ---" >&2
+      kubectl exec -n "$NAMESPACE" "$POD" -- tail -40 "$LOG_FILE" >&2 || true
+      exit 1
+    fi
   fi
 done
 if [[ "$SUBMIT_SEEN" == "1" ]]; then
