@@ -606,8 +606,10 @@ echo "=== Watching for first submission activity (up to 2 min) ==="
 SUBMIT_SEEN=0
 for i in $(seq 1 12); do
   sleep 10
-  if retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-    "grep -qEi 'analysis|osa|submit|project' '${LOG_FILE}' 2>/dev/null"; then
+  # Plain kubectl, not retry_kubectl: grep exiting 1 just means "no match yet",
+  # and retrying it with backoff turned a 2 min watch into ~30 min.
+  if kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
+    "grep -qEi 'analysis|osa|submit|project' '${LOG_FILE}' 2>/dev/null" 2>/dev/null; then
     SUBMIT_SEEN=1
     break
   fi
