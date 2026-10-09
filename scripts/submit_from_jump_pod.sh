@@ -262,7 +262,9 @@ if [[ "$FORCE_RESTAGE" != "1" ]]; then
   fi
 fi
 
-REMOTE_TMP="/tmp/bem_to_surrogate_chunks"
+# Stage chunks on the PVC, not /tmp: pod ephemeral storage is capped (10Gi) and
+# exceeding it evicts the pod.
+REMOTE_TMP="${REMOTE_ROOT}.chunks"
 echo "=== Preparing remote directories ==="
 # Keep the submit manifest and already-submitted batch files across a re-stage
 # so a rerun after eviction resumes instead of starting from zero. Merge-copy
@@ -282,8 +284,9 @@ if [ -d \"\$P/submitted\" ]; then
 fi
 " || { echo "Failed to save submit state to ${STATE_DIR}; not wiping ${REMOTE_ROOT}" >&2; exit 1; }
 # rm can fail on NFS ".nfsXXXX" files held open by a still-running process from an
-# interrupted earlier run; stop those first, then wipe.
-kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'pkill -f "tar -xzf /tmp/bem_to_surrogate_chunks" 2>/dev/null; pkill -f "cat /tmp/bem_to_surrogate_chunks" 2>/dev/null; sleep 1; true' || true
+# interrupted earlier run; stop those first, then wipe. The [c] keeps pkill from
+# matching (and SIGTERMing, exit 143) its own bash -c command line.
+kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "pkill -f '[c]at ${REMOTE_TMP}/' 2>/dev/null; sleep 1; true" || true
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT" "$REMOTE_TMP"
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- mkdir -p "$REMOTE_ROOT" "$REMOTE_TMP"
 
@@ -305,7 +308,7 @@ copy_tarball_to_pod() {
   done
   rm -rf "$chunk_dir"
   retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-    "cat ${REMOTE_TMP}/${label}_* > ${REMOTE_TMP}/${label}.tar.gz && tar -xzf ${REMOTE_TMP}/${label}.tar.gz -C '${REMOTE_ROOT}' && rm -f ${REMOTE_TMP}/${label}_* ${REMOTE_TMP}/${label}.tar.gz"
+    "set -o pipefail; cat ${REMOTE_TMP}/${label}_* | tar -xzf - -C '${REMOTE_ROOT}' && rm -f ${REMOTE_TMP}/${label}_*"
 }
 
 echo "=== Packing repo (excluding .bundle, outputs, spec/integration, tmp, sweep_results, SR1, notebook, .git) ==="
