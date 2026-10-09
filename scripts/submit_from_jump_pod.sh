@@ -541,7 +541,7 @@ for attempt in $(seq 1 "$MAX_RETRIES"); do
     kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'mv -f "$1" "$1.$(date +%s).old" 2>/dev/null || true' _ "$LOG_FILE" || true
   fi
   if with_timeout 30 kubectl exec -n "$NAMESPACE" "$POD" -- bash -lc \
-    "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext && (setsid nohup bundle exec rake ${RAKE_TASK} > '${LOG_FILE}' 2>&1 < /dev/null & echo \$! > '${LOCK_FILE}') ; echo started" \
+    "cd '${REMOTE_ROOT}' && export BUNDLE_PATH='${REMOTE_ROOT}/.bundle' BUNDLE_WITHOUT=native_ext ALLOW_STALE='${ALLOW_STALE:-1}' && (setsid nohup bundle exec rake ${RAKE_TASK} > '${LOG_FILE}' 2>&1 < /dev/null & echo \$! > '${LOCK_FILE}') ; echo started" \
     2>&1 | tee /dev/stderr | grep -q "^started$"; then
     LAUNCHED=1
     break
