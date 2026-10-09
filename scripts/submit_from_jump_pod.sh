@@ -293,6 +293,9 @@ fi
 # matching (and SIGTERMing, exit 143) its own bash -c command line.
 kubectl exec -n "$NAMESPACE" "$POD" -- bash -c "pkill -f '[c]at ${REMOTE_ROOT}.chunks' 2>/dev/null; sleep 1; true" || true
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- rm -rf "$REMOTE_ROOT"
+# Drop chunk dirs orphaned by hard-killed/evicted earlier runs (older than 12h).
+kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
+  'find "$(dirname "$1")" -maxdepth 1 -name "$(basename "$1").chunks.*" -mmin +720 -exec rm -rf {} + 2>/dev/null; true' _ "$REMOTE_ROOT" || true
 retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- mkdir -p "$REMOTE_ROOT" "$REMOTE_TMP"
 
 # Split a tarball into chunks and copy each with retry, so one dropped
@@ -313,7 +316,7 @@ copy_tarball_to_pod() {
   done
   rm -rf "$chunk_dir"
   retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-    "set -o pipefail; cat ${REMOTE_TMP}/${label}_* | tar -xzf - -C '${REMOTE_ROOT}' && rm -f ${REMOTE_TMP}/${label}_*"
+    'set -o pipefail; cat "$1"/"$2"_* | tar -xzf - -C "$3" && rm -f "$1"/"$2"_*' _ "$REMOTE_TMP" "$label" "$REMOTE_ROOT"
 }
 
 echo "=== Packing repo (excluding .bundle, outputs, spec/integration, tmp, tmp_analysis, sweep_results, SR1, notebook, .git) ==="
@@ -571,6 +574,13 @@ fi
 
 echo "=== Confirming the process is alive ==="
 sleep 15
+# Prints alive/dead for the PID in the lock file; prints nothing if the exec itself
+# failed (inconclusive, so callers must not treat it as "dead").
+rake_state() {
+  kubectl exec -n "$NAMESPACE" "$POD" -- bash -c '
+    PID=$(cat "$1" 2>/dev/null)
+    if [ -n "$PID" ] && ps -p "$PID" -o pid= 2>/dev/null | grep -q .; then echo alive; else echo dead; fi' _ "$LOCK_FILE" 2>/dev/null | tr -d ' \r'
+}
 if retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- pgrep -f "rake ${RAKE_TASK}" > /dev/null 2>&1; then
   # Measure 3 + 6: Count processes; kill duplicates if more than one.
   PROCESS_COUNT="$(kubectl exec -n "$NAMESPACE" "$POD" -- bash -c 'echo $(pgrep -f "rake '${RAKE_TASK}'" | wc -l | tr -d " ")' 2>/dev/null || echo "0")"
@@ -615,14 +625,17 @@ for i in $(seq 1 12); do
     break
   fi
   # A task that died after launch (e.g. aborted pre-submit check) must fail the
-  # script instead of being reported as submitted.
-  if ! kubectl exec -n "$NAMESPACE" "$POD" -- pgrep -f "rake ${RAKE_TASK}" >/dev/null 2>&1; then
-    if kubectl exec -n "$NAMESPACE" "$POD" -- test -d "${REMOTE_ROOT}" >/dev/null 2>&1; then
-      echo "ERROR: rake ${RAKE_TASK} exited before any submission activity." >&2
-      echo "--- last 40 log lines ---" >&2
-      kubectl exec -n "$NAMESPACE" "$POD" -- tail -40 "$LOG_FILE" >&2 || true
-      exit 1
+  # script instead of being reported as submitted. A failed exec is inconclusive.
+  if [[ "$(rake_state)" == "dead" ]]; then
+    if kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
+      "grep -qEi 'analysis|osa|submit|project' '${LOG_FILE}' 2>/dev/null" 2>/dev/null; then
+      SUBMIT_SEEN=1   # finished quickly after submitting
+      break
     fi
+    echo "ERROR: rake ${RAKE_TASK} exited before any submission activity." >&2
+    echo "--- last 40 log lines ---" >&2
+    kubectl exec -n "$NAMESPACE" "$POD" -- tail -40 "$LOG_FILE" >&2 || true
+    exit 1
   fi
 done
 if [[ "$SUBMIT_SEEN" == "1" ]]; then
