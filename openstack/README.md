@@ -74,6 +74,14 @@ NodePort and the proxy returns `502 Bad Gateway`.
   `web_svc.nodePorts.http` (match the proxy's `nodeport_port`, default `32105`).
   Add them (copy from `values-openstack.yaml.template`) and re-run the upgrade
   with `-n openstudio-server`.
+- **NFS backend storage tier**: `nfs-server-provisioner.persistence.storageClass`
+  selects the Cinder volume type for the NFS backend (and so `nfs-pvc`). The
+  template uses `hdd` (Cinder type `lagos_volume`, the regular HDD tier); db,
+  redis and the registry stay on `ssd`. The chart creates `hdd` only on the
+  `openstack` provider and, like `ssd`, only if it doesn't already exist. The
+  same recreate/ownership troubleshooting below applies to `hdd`. Changing the
+  class on an existing install does not migrate the NFS PVC; back up and
+  reinstall.
 - **`StorageClass "ssd" ... exists and cannot be imported into the current
   release: invalid ownership metadata`**: a `ssd` StorageClass from a
   previous/different release or namespace is still on the cluster. If

@@ -110,8 +110,12 @@ cluster:
 # storageClass.reclaimPolicy is left at the chart default (Delete) so
 # uninstalling/recreating never leaves an orphaned Cinder volume behind if
 # manual cleanup is forgotten.
+# The NFS backend (and therefore nfs-pvc) lives on the regular HDD tier: the
+# chart's "hdd" StorageClass maps to the Cinder "lagos_volume" volume type.
+# Everything else (db, redis, registry) stays on "ssd".
 nfs-server-provisioner:
   persistence:
+    storageClass: "hdd"
     size: 3900Gi
   resources:
     requests:

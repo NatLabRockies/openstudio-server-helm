@@ -85,6 +85,7 @@ spec:
                 best_effort kubectl delete priorityclass high-priority --ignore-not-found=true
                 best_effort kubectl delete priorityclass low-priority --ignore-not-found=true
                 best_effort kubectl delete storageclass ssd --ignore-not-found=true
+                best_effort kubectl delete storageclass hdd --ignore-not-found=true
               else
                 echo "[pre-delete] Skipping PriorityClass/StorageClass deletion (deleteClusterResources=$DELETE_CLUSTER_RESOURCES)"
               fi
