@@ -260,6 +260,18 @@ rserve_svc:
   label: "rserve"
   port: 6311
 
+# Rails/Resque logs (docker.log, resque.log) grow without bound on the web and
+# web-background containers' writable layer and count toward the node's
+# ephemeral storage. A web pod grew to ~7.8GiB and was evicted
+# ("node low on ephemeral-storage"). Logs now live on a size-capped emptyDir; a
+# sidecar gzips oversized logs to the NFS PVC (/mnt/openstudio/logs/<component>)
+# and truncates them in place.
+logs:
+  maxSizeMB: 512
+  checkIntervalSeconds: 300
+  archiveRetentionDays: 14
+  emptyDirSizeLimit: 4Gi
+
 web_background:
   name: "web-background"
   label: "web-background"
@@ -272,6 +284,9 @@ web_background:
       requests:
         cpu: 0.25
         memory: "512Mi"
+        ephemeral-storage: "1Gi"
+      limits:
+        ephemeral-storage: "8Gi"
 
 web:
   name: "web"
@@ -291,6 +306,9 @@ web:
       requests:
         cpu: 1
         memory: "2Gi"
+        ephemeral-storage: "1Gi"
+      limits:
+        ephemeral-storage: "8Gi"
     port:
      http: 80
      https: 443
