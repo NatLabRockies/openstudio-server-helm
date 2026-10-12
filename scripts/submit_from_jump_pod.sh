@@ -64,6 +64,7 @@ case "$REMOTE_ROOT" in
 esac
 STATE_DIR="${REMOTE_ROOT}.state"   # survives the re-stage wipe of REMOTE_ROOT
 FORCE_RESTAGE="${FORCE_RESTAGE:-0}" # 1 = restage even if a submission is still running
+BATCH_ONLY_MATCH="${BATCH_ONLY_MATCH:-0}"   # 1 = match server analyses by Batch<N> only (names lack project name)
 CHECK_ONLY="${CHECK_ONLY:-0}"      # 1 = only compare expected vs created batches
 CHUNK_SIZE="${CHUNK_SIZE:-100m}"   # split size for the resilient copy
 MAX_RETRIES="${MAX_RETRIES:-6}"    # retries per chunk/command before giving up
@@ -233,7 +234,7 @@ echo "  OK: jump-pod can reach ${IN_CLUSTER_SERVER_URI}"
 
 RECONCILE_RB="$(dirname "$0")/jump_pod_reconcile.rb"
 run_reconcile() {
-  kubectl exec -i -n "$NAMESPACE" "$POD" -- ruby - "$1" "$IN_CLUSTER_SERVER_URI" "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" "$PROJECT_NAME" < "$RECONCILE_RB"
+  kubectl exec -i -n "$NAMESPACE" "$POD" -- env BATCH_ONLY_MATCH="${BATCH_ONLY_MATCH:-0}" ruby - "$1" "$IN_CLUSTER_SERVER_URI" "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" "$PROJECT_NAME" < "$RECONCILE_RB"
 }
 if [[ "$CHECK_ONLY" == "1" ]]; then
   echo "=== CHECK_ONLY=1: expected vs created batches (read-only, using staged project) ==="

@@ -34,6 +34,13 @@ end
 
 RUNNING_STATES = %w[started queued running pending].freeze
 STUB_MIN_AGE = (ENV['STUB_MIN_AGE'] || 900).to_i
+# The gem names analyses "Batch<N>_<type>_<timestamp>" without the project name,
+# so the project-name match above never succeeds and every batch looks missing
+# (a rerun would duplicate everything). Set BATCH_ONLY_MATCH=1 to match on the
+# Batch<N> token alone. Only use when the server hosts a single project; stub
+# deletion stays disabled in this mode because strict_re still requires the
+# project name.
+BATCH_ONLY_MATCH = ENV['BATCH_ONLY_MATCH'] == '1'
 
 # Returns [data_point_count, analysis_status_string].
 def analysis_state(base, id)
@@ -70,7 +77,7 @@ strict_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}[\s_.:\-]*(?:parametric_sp
 by_batch = Hash.new { |h, k| h[k] = [] }
 analyses.each do |a|
   label = [a['name'], a['display_name']].compact.join(' ')
-  next unless label =~ proj_re
+  next unless BATCH_ONLY_MATCH || label =~ proj_re
   n = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
   by_batch[n.to_i] << [a, label =~ strict_re ? true : false] if n
 end
