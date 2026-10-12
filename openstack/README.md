@@ -77,7 +77,7 @@ NodePort and the proxy returns `502 Bad Gateway`.
 - **NFS backend storage tier**: `nfs-server-provisioner.persistence.storageClass`
   selects the Cinder volume type for the NFS backend (and so `nfs-pvc`). The
   template uses `hdd` (Cinder type `lagos_volume`, the regular HDD tier); db,
-  redis and the registry stay on `ssd`. The chart creates `hdd` only on the
+  redis and the registry stay on `ssd` (Cinder type `lagos_ssd`). The chart creates `hdd` only on the
   `openstack` provider and, like `ssd`, only if it doesn't already exist. The
   same recreate/ownership troubleshooting below applies to `hdd`. Changing the
   class on an existing install does not migrate the NFS PVC; back up and

@@ -26,6 +26,8 @@ parameters:
 # (and any other modern OpenStack/Cluster API cluster) only ship the external
 # Cinder CSI driver, so this must use its provisioner name instead.
 provisioner: cinder.csi.openstack.org
+parameters:
+  type: lagos_ssd
 {{ end }}
 reclaimPolicy: Delete
 allowVolumeExpansion: true
