@@ -404,7 +404,7 @@ end
 
 echo "=== Verifying batch files landed in the pod ==="
 POD_BATCHES="$(retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-  "ls '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/parametric_space*.json 2>/dev/null | wc -l" | tr -d ' \r')"
+  "ls '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/parametric_space*.json '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/submitted/parametric_space*.json 2>/dev/null | wc -l" | tr -d ' \r')"
 echo "  -> ${POD_BATCHES} batch file(s) in pod (expected ${BATCH_COUNT})"
 if [[ "$POD_BATCHES" != "$BATCH_COUNT" ]]; then
   echo "Batch file count mismatch; aborting rather than submitting a partial run." >&2
