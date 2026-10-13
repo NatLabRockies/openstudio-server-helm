@@ -106,7 +106,7 @@ echo "Service ${NAMESPACE}/${SERVICE} NodePort: ${NODEPORT}"
 selector_args=()
 [[ -n "$NODE_SELECTOR" ]] && selector_args=(-l "$NODE_SELECTOR")
 # One line per node: name Ready(True/False) control-plane(yes/no) InternalIP
-tmpl='{{range .items}}{{$n:=.metadata.name}}{{$r:="False"}}{{range .status.conditions}}{{if eq .type "Ready"}}{{$r = .status}}{{end}}{{end}}{{$cp:="no"}}{{if index .metadata.labels "node-role.kubernetes.io/control-plane"}}{{$cp = "yes"}}{{end}}{{range .status.addresses}}{{if eq .type "InternalIP"}}{{$n}} {{$r}} {{$cp}} {{.address}}{{"\n"}}{{end}}{{end}}{{end}}'
+tmpl='{{range .items}}{{$n:=.metadata.name}}{{$r:="False"}}{{range .status.conditions}}{{if eq .type "Ready"}}{{$r = .status}}{{end}}{{end}}{{$cp:="no"}}{{range $key, $value := .metadata.labels}}{{if or (eq $key "node-role.kubernetes.io/control-plane") (eq $key "node-role.kubernetes.io/master")}}{{$cp = "yes"}}{{end}}{{end}}{{range .status.addresses}}{{if eq .type "InternalIP"}}{{$n}} {{$r}} {{$cp}} {{.address}}{{"\n"}}{{end}}{{end}}{{end}}'
 rows="$("${KUBECTL[@]}" get nodes ${selector_args[@]+"${selector_args[@]}"} -o go-template="$tmpl")"
 
 candidates=()
@@ -160,11 +160,10 @@ sudo awk -v name="$name" -v servers="$servers" '
 grep -q "^upstream ${name} {" "$tmp" || { echo "upstream ${name} not found in $conf" >&2; rm -f "$tmp"; exit 1; }
 sudo install -m 0644 -o root -g root "$tmp" "$conf"
 rm -f "$tmp"
-if sudo nginx -t 2>&1; then
-  sudo systemctl reload nginx
+if sudo nginx -t 2>&1 && sudo systemctl reload nginx; then
   echo "nginx reloaded; backup at $backup"
 else
-  echo "nginx -t failed; restoring $backup" >&2
+  echo "nginx validation or reload failed; restoring $backup" >&2
   sudo cp -p "$backup" "$conf"
   exit 1
 fi
