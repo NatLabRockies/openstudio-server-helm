@@ -44,6 +44,22 @@ terraform plan -var-file=terraform.tfvars
 terraform apply -var-file=terraform.tfvars
 ```
 
+## Refreshing the upstream after the cluster changes
+
+When the cluster is rebuilt or nodes change, run `scripts/update-proxy-upstream.sh` instead of re-applying Terraform. It reads the `web` Service NodePort and the Ready nodes' InternalIPs with `kubectl`, keeps only the nodes that answer on the NodePort *from the proxy VM*, rewrites the `upstream` block, runs `nginx -t`, reloads nginx, and restores a timestamped backup if validation fails.
+
+```bash
+# Preview
+scripts/update-proxy-upstream.sh --proxy-host <proxy-ip> --ssh-user cloud --ssh-key ~/.ssh/<key> \
+  --kubeconfig ~/.kube/<cluster>.yaml --dry-run
+
+# Apply
+scripts/update-proxy-upstream.sh --proxy-host <proxy-ip> --ssh-user cloud --ssh-key ~/.ssh/<key> \
+  --kubeconfig ~/.kube/<cluster>.yaml
+```
+
+Run `--help` for options (namespace, service, node selector, `--local` to run on the VM itself, and so on). The script needs `kubectl` on the machine running it and passwordless `sudo` for the SSH user on the VM. To keep it current automatically, run it from cron or a CI job. Update `nodeport_upstream_hosts` in `terraform.tfvars` as well so a later `terraform apply` does not revert the change.
+
 ## Notes
 
 - This is a good foundation for IaC, but the real long-term fix is still to resolve the Octavia/Azimuth LB problem at the platform level.
