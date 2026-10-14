@@ -27,6 +27,7 @@ spec:
           - name: init-wait-for-db
             image: {{ .Values.web.initContainer.image | default "alpine" | quote }}
             command: ["/bin/sh", "-c", "for i in $(seq 1 300); do nc -zvw1 {{  .Values.db.name  }} {{ .Values.db.container.ports.db_port }} && exit 0 || sleep 3; done; exit 1"]
+          {{- include "openstudio.logInit" . | nindent 10 }}
       containers:
         - name:  {{ .Values.web.container.name  }}
           image: {{ include "openstudio.imageWithRegistry" (dict "root" $ "image" .Values.web.container.image) | quote }}
@@ -35,6 +36,7 @@ spec:
             requests:
               cpu:  {{  .Values.web.container.resources.requests.cpu  }}
               memory:  {{  .Values.web.container.resources.requests.memory  }}
+              {{- include "openstudio.ephemeralRequest" .Values.web.container.resources.requests | nindent 14 }}
             {{- include "openstudio.resourceLimits" .Values.web.container.resources.limits | nindent 12 }}
           ports:
             - containerPort: {{ .Values.web.container.port.http  }}
@@ -42,6 +44,8 @@ spec:
           volumeMounts:
             - name: nfs
               mountPath: "/mnt/openstudio"
+            - name: app-logs
+              mountPath: /opt/openstudio/server/log
           env:
             - name: OS_SERVER_NUMBER_OF_WORKERS
               value: {{ .Values.web_background.number_of_workers | quote }}
@@ -75,9 +79,13 @@ spec:
             periodSeconds: 200
             timeoutSeconds: 120
             failureThreshold: 3
+        {{- include "openstudio.logTrimSidecar" (dict "root" . "component" "web") | nindent 8 }}
       priorityClassName: high-priority
       terminationGracePeriodSeconds: 60
       volumes:
         - name: nfs
           persistentVolumeClaim:
             claimName: nfs-pvc
+        - name: app-logs
+          emptyDir:
+            sizeLimit: {{ .Values.logs.emptyDirSizeLimit }}

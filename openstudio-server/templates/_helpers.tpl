@@ -66,7 +66,66 @@ limits:
 {{- if .memory }}
   memory: {{ .memory }}
 {{- end }}
+{{- if index . "ephemeral-storage" }}
+  ephemeral-storage: {{ index . "ephemeral-storage" }}
 {{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Optional ephemeral-storage request line, rendered under "requests:".
+Usage: {{- include "openstudio.ephemeralRequest" .Values.web.container.resources.requests | nindent 14 }}
+*/}}
+{{- define "openstudio.ephemeralRequest" -}}
+{{- if index . "ephemeral-storage" }}
+ephemeral-storage: {{ index . "ephemeral-storage" }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Sidecar that keeps Rails/Resque logs from filling the node's ephemeral disk.
+The app log dir is an emptyDir shared with this sidecar; every
+.Values.logs.checkIntervalSeconds any *.log above .Values.logs.maxSizeMB is
+gzipped to the NFS PVC (/mnt/openstudio/logs/<component>) and truncated in place
+(copytruncate; Rails opens its logs O_APPEND so this is safe). Archives older
+than .Values.logs.archiveRetentionDays are deleted.
+Usage: {{- include "openstudio.logTrimSidecar" (dict "root" . "component" "web") | nindent 8 }}
+*/}}
+{{- define "openstudio.logTrimSidecar" -}}
+- name: log-trim
+  image: {{ .root.Values.web.initContainer.image | default "alpine" | quote }}
+  command:
+    - /bin/sh
+    - -c
+    - |
+      MAX=$(( {{ .root.Values.logs.maxSizeMB }} * 1048576 ))
+      DEST=/mnt/openstudio/logs/{{ .component }}
+      mkdir -p "$DEST"
+      while true; do
+        for f in /logs/*.log; do
+          [ -f "$f" ] || continue
+          SZ=$(stat -c %s "$f")
+          if [ "$SZ" -gt "$MAX" ]; then
+            gzip -c "$f" > "$DEST/$(basename "$f").$(date +%Y%m%d-%H%M%S).gz" && : > "$f"
+            echo "rotated $f ($SZ bytes)"
+          fi
+        done
+        find "$DEST" -name '*.gz' -mtime +{{ .root.Values.logs.archiveRetentionDays }} -delete
+        sleep {{ .root.Values.logs.checkIntervalSeconds }}
+      done
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+      ephemeral-storage: 100Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  volumeMounts:
+    - name: app-logs
+      mountPath: /logs
+    - name: nfs
+      mountPath: /mnt/openstudio
 {{- end -}}
 
 {{/*
@@ -373,4 +432,24 @@ false
 {{- else -}}
   {{ $rserve.number_of_workers }}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Init container that pre-creates the app log files world-writable on the log
+emptyDir. The image entrypoint creates docker.log as root while Passenger runs
+the app as "nobody", so a fresh (empty) emptyDir would otherwise make the app
+fail to spawn with EACCES on docker.log.
+Usage: {{- include "openstudio.logInit" . | nindent 10 }}
+*/}}
+{{- define "openstudio.logInit" -}}
+- name: init-log-perms
+  image: {{ .Values.web.initContainer.image | default "alpine" | quote }}
+  command: ["/bin/sh", "-c", "chmod 777 /logs && touch /logs/docker.log /logs/resque.log && chmod 666 /logs/*.log"]
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+  volumeMounts:
+    - name: app-logs
+      mountPath: /logs
 {{- end -}}
