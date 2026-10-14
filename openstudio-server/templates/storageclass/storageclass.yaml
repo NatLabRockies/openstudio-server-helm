@@ -26,8 +26,28 @@ parameters:
 # (and any other modern OpenStack/Cluster API cluster) only ship the external
 # Cinder CSI driver, so this must use its provisioner name instead.
 provisioner: cinder.csi.openstack.org
+parameters:
+  type: lagos_ssd
 {{ end }}
 reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer
+{{- end }}
+
+{{- if eq .Values.provider.name "openstack" }}
+{{- if not (lookup "storage.k8s.io/v1" "StorageClass" "" "hdd") }}
+---
+# Cinder "lagos_volume" volume type is the regular (HDD) tier. Used for bulk
+# storage such as the NFS backend; the "ssd" class above is for everything else.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hdd
+provisioner: cinder.csi.openstack.org
+parameters:
+  type: lagos_volume
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+{{- end }}
 {{- end }}
