@@ -9,10 +9,12 @@
 #   MODE=check      report expected vs created; exit 1 if any batch is missing/empty
 #
 # A batch is matched to an analysis when its name/display_name contains either:
-#   - the exact batch stem from `parametric_space_<batch_stem>.json` (e.g.
+#   - a non-bare batch stem from `parametric_space_<batch_stem>.json` (one that
+#     carries an additional discriminator beyond `Batch<N>`, e.g.
 #     `Batch1000_baseline_testing` -> `Batch1000_baseline_testing_2026_10_13_...`), or
-#   - the project name (bounded by non-alphanumerics) AND "Batch<N>".
-# An analysis is only DELETED if it matches the exact batch stem (or project + Batch<N>),
+#   - the project name (bounded by non-alphanumerics) AND "Batch<N>", or
+#   - "Batch<N>" alone when BATCH_ONLY_MATCH=1 is explicitly set.
+# An analysis is only DELETED if it matches a non-bare batch stem (or project + Batch<N>),
 # has 0 data points, is not running, and is older than STUB_MIN_AGE seconds (default 900).
 # Any young/running empty analysis aborts reconcile (it may still be populating).
 # Status lookup errors abort the run without deleting anything.
@@ -35,6 +37,13 @@ end
 
 RUNNING_STATES = %w[started queued running pending].freeze
 STUB_MIN_AGE = (ENV['STUB_MIN_AGE'] || 900).to_i
+# The gem names analyses "Batch<N>_<type>_<timestamp>" without the project name,
+# so the project-name match above never succeeds and every batch looks missing
+# (a rerun would duplicate everything). Set BATCH_ONLY_MATCH=1 to match on the
+# Batch<N> token alone. Only use when the server hosts a single project; stub
+# deletion stays disabled in this mode because strict_re still requires the
+# project name.
+BATCH_ONLY_MATCH = ENV['BATCH_ONLY_MATCH'] == '1'
 
 # Returns [data_point_count, analysis_status_string].
 def analysis_state(base, id)
@@ -57,7 +66,12 @@ def batch_of(f)
 end
 
 def batch_stem_of(f)
-  File.basename(f, '.json').sub(/\Aparametric_space_?/i, '')
+  stem = File.basename(f, '.json').sub(/\Aparametric_space_?/i, '')
+  # Bare `Batch<N>` stems (from `parametric_space_Batch<N>.json`) have no project/run
+  # discriminator beyond the batch number itself; ignore them so they fall back to
+  # project-qualified matching (or explicit BATCH_ONLY_MATCH=1) instead of matching
+  # and deleting analyses from unrelated projects that share the same batch number.
+  stem.match?(/\ABatch_?\d+\z/i) ? nil : stem
 end
 
 expected = {}
@@ -68,7 +82,7 @@ expected_stems = {}
     next unless n
     expected[n] = f
     stem = batch_stem_of(f)
-    expected_stems[n] = stem unless stem.empty?
+    expected_stems[n] = stem if stem && !stem.empty?
   end
 end
 abort "No parametric_space batch files found in #{dir}" if expected.empty?
@@ -79,14 +93,14 @@ strict_proj_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}[\s_.:\-]*(?:parametr
 by_batch = Hash.new { |h, k| h[k] = [] }
 analyses.each do |a|
   label = [a['name'], a['display_name']].compact.join(' ')
-  n_str = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?!\d)/i, 1]
+  n_str = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
   next unless n_str
   n = n_str.to_i
   stem = expected_stems[n]
   stem_re = stem ? /(?<![A-Za-z0-9])#{Regexp.escape(stem)}(?![A-Za-z0-9])/i : nil
   matched_stem = stem_re && label =~ stem_re
-  matched_proj = label =~ proj_re && label =~ /(?<![A-Za-z0-9])Batch_?\d+(?![0-9A-Za-z])/i
-  next unless matched_stem || matched_proj
+  matched_proj = label =~ proj_re
+  next unless matched_stem || matched_proj || BATCH_ONLY_MATCH
   strict = matched_stem || (label =~ strict_proj_re)
   by_batch[n] << [a, strict ? true : false]
 end

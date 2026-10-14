@@ -64,6 +64,7 @@ case "$REMOTE_ROOT" in
 esac
 STATE_DIR="${REMOTE_ROOT}.state"   # survives the re-stage wipe of REMOTE_ROOT
 FORCE_RESTAGE="${FORCE_RESTAGE:-0}" # 1 = restage even if a submission is still running
+BATCH_ONLY_MATCH="${BATCH_ONLY_MATCH:-0}"   # 1 = match server analyses by Batch<N> only (names lack project name)
 CHECK_ONLY="${CHECK_ONLY:-0}"      # 1 = only compare expected vs created batches
 CHUNK_SIZE="${CHUNK_SIZE:-100m}"   # split size for the resilient copy
 MAX_RETRIES="${MAX_RETRIES:-6}"    # retries per chunk/command before giving up
@@ -117,9 +118,9 @@ PROJECT_DIR="${GEM_DIR}/outputs/${PROJECT_NAME}"
 BATCH_COUNT="$(find "$PROJECT_DIR" -maxdepth 1 -name 'parametric_space*.json' | wc -l | tr -d ' ')"
 echo "=== Project '${PROJECT_NAME}': ${BATCH_COUNT} parametric_space batch file(s) ==="
 
+JUMP_POD_SELECTOR="app=${JUMP_POD_LABEL}${JUMP_POD_RELEASE:+,release=${JUMP_POD_RELEASE}}"
 get_jump_pod() {
-  local pod="" attempt=1 delay=5 selector="app=${JUMP_POD_LABEL}" pods n
-  [[ -n "${JUMP_POD_RELEASE:-}" ]] && selector="${selector},release=${JUMP_POD_RELEASE}"
+  local pod="" attempt=1 delay=5 selector="$JUMP_POD_SELECTOR" pods n
   until [[ -n "$pod" ]]; do
     # Only Running pods: an evicted pod lingers in Error state and sorts first.
     pods="$(kubectl get pods -n "$NAMESPACE" -l "$selector" --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
@@ -156,8 +157,10 @@ echo "=== Using jump pod: ${POD} ==="
 PVC_CHECK_OUT="$(kubectl exec -n "$NAMESPACE" "$POD" -- ls -d "$PVC_ROOT" 2>&1 || true)"
 if echo "$PVC_CHECK_OUT" | grep -qi "Stale file handle"; then
   echo "WARNING: ${POD} has a stale NFS file handle on ${PVC_ROOT}; restarting jump-pod deployment..." >&2
-  kubectl rollout restart deployment -n "$NAMESPACE" "$JUMP_POD_LABEL"
-  kubectl rollout status deployment -n "$NAMESPACE" "$JUMP_POD_LABEL" --timeout=180s
+  JUMP_DEPLOY="$(kubectl get deployment -n "$NAMESPACE" -l "$JUMP_POD_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "$JUMP_DEPLOY" ]] || JUMP_DEPLOY="$JUMP_POD_LABEL"
+  kubectl rollout restart deployment -n "$NAMESPACE" "$JUMP_DEPLOY"
+  kubectl rollout status deployment -n "$NAMESPACE" "$JUMP_DEPLOY" --timeout=180s
   POD="$(get_jump_pod)"
   if [[ -z "$POD" ]]; then
     echo "No running jump-pod found after rollout restart." >&2
@@ -249,7 +252,7 @@ echo "  OK: jump-pod can reach ${IN_CLUSTER_SERVER_URI}"
 
 RECONCILE_RB="$(dirname "$0")/jump_pod_reconcile.rb"
 run_reconcile() {
-  kubectl exec -i -n "$NAMESPACE" "$POD" -- ruby - "$1" "$IN_CLUSTER_SERVER_URI" "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" "$PROJECT_NAME" < "$RECONCILE_RB"
+  kubectl exec -i -n "$NAMESPACE" "$POD" -- env BATCH_ONLY_MATCH="${BATCH_ONLY_MATCH:-0}" ruby - "$1" "$IN_CLUSTER_SERVER_URI" "${REMOTE_ROOT}/outputs/${PROJECT_NAME}" "$PROJECT_NAME" < "$RECONCILE_RB"
 }
 if [[ "$CHECK_ONLY" == "1" ]]; then
   echo "=== CHECK_ONLY=1: expected vs created batches (read-only, using staged project) ==="
@@ -420,7 +423,7 @@ end
 
 echo "=== Verifying batch files landed in the pod ==="
 POD_BATCHES="$(retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-  "ls '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/parametric_space*.json '${REMOTE_ROOT}/outputs/${PROJECT_NAME}/submitted'/parametric_space*.json 2>/dev/null | wc -l" | tr -d ' \r')"
+  "for f in '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/parametric_space*.json '${REMOTE_ROOT}/outputs/${PROJECT_NAME}/submitted'/parametric_space*.json; do [ -e \"\$f\" ] && basename \"\$f\"; done | sort -u | wc -l" | tr -d ' \r')"
 echo "  -> ${POD_BATCHES} batch file(s) in pod (expected ${BATCH_COUNT})"
 if [[ "$POD_BATCHES" != "$BATCH_COUNT" ]]; then
   echo "Batch file count mismatch; aborting rather than submitting a partial run." >&2

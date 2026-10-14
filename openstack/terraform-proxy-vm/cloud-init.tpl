@@ -32,6 +32,8 @@ write_files:
       }
 
 runcmd:
+  # Drop the stock default server block so it doesn't conflict with proxy.conf
+  - sed -i '/^    server {$/,/^    }$/d' /etc/nginx/nginx.conf
   - setsebool -P httpd_can_network_connect 1
   - systemctl enable nginx
   - systemctl restart nginx

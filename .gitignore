@@ -25,3 +25,6 @@ openstack/values-openstack.yaml
 # tmp
 tmp/
 .DS_Store
+
+# terraform variable files (may contain secrets); keep *.example
+*.tfvars
