@@ -118,9 +118,9 @@ PROJECT_DIR="${GEM_DIR}/outputs/${PROJECT_NAME}"
 BATCH_COUNT="$(find "$PROJECT_DIR" -maxdepth 1 -name 'parametric_space*.json' | wc -l | tr -d ' ')"
 echo "=== Project '${PROJECT_NAME}': ${BATCH_COUNT} parametric_space batch file(s) ==="
 
+JUMP_POD_SELECTOR="app=${JUMP_POD_LABEL}${JUMP_POD_RELEASE:+,release=${JUMP_POD_RELEASE}}"
 get_jump_pod() {
-  local pod="" attempt=1 delay=5 selector="app=${JUMP_POD_LABEL}" pods n
-  [[ -n "${JUMP_POD_RELEASE:-}" ]] && selector="${selector},release=${JUMP_POD_RELEASE}"
+  local pod="" attempt=1 delay=5 selector="$JUMP_POD_SELECTOR" pods n
   until [[ -n "$pod" ]]; do
     # Only Running pods: an evicted pod lingers in Error state and sorts first.
     pods="$(kubectl get pods -n "$NAMESPACE" -l "$selector" --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
@@ -150,6 +150,24 @@ if [[ -z "$POD" ]]; then
   exit 1
 fi
 echo "=== Using jump pod: ${POD} ==="
+
+# Verify the PVC mount in jump-pod is healthy (not a stale NFS file handle after
+# nfs-server-provisioner pod eviction/restart). If stale, automatically rollout-restart
+# the jump-pod deployment and pick up the fresh pod.
+PVC_CHECK_OUT="$(kubectl exec -n "$NAMESPACE" "$POD" -- ls -d "$PVC_ROOT" 2>&1 || true)"
+if echo "$PVC_CHECK_OUT" | grep -qi "Stale file handle"; then
+  echo "WARNING: ${POD} has a stale NFS file handle on ${PVC_ROOT}; restarting jump-pod deployment..." >&2
+  JUMP_DEPLOY="$(kubectl get deployment -n "$NAMESPACE" -l "$JUMP_POD_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "$JUMP_DEPLOY" ]] || JUMP_DEPLOY="$JUMP_POD_LABEL"
+  kubectl rollout restart deployment -n "$NAMESPACE" "$JUMP_DEPLOY"
+  kubectl rollout status deployment -n "$NAMESPACE" "$JUMP_DEPLOY" --timeout=180s
+  POD="$(get_jump_pod)"
+  if [[ -z "$POD" ]]; then
+    echo "No running jump-pod found after rollout restart." >&2
+    exit 1
+  fi
+  echo "=== Using restarted jump pod: ${POD} ==="
+fi
 
 # Preflight: confirm jump-pod can actually reach the web service over the
 # cluster pod network *before* spending minutes packing/copying/bundling.
@@ -405,7 +423,7 @@ end
 
 echo "=== Verifying batch files landed in the pod ==="
 POD_BATCHES="$(retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-  "ls '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/parametric_space*.json '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/submitted/parametric_space*.json 2>/dev/null | wc -l" | tr -d ' \r')"
+  "for f in '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/parametric_space*.json '${REMOTE_ROOT}/outputs/${PROJECT_NAME}/submitted'/parametric_space*.json; do [ -e \"\$f\" ] && basename \"\$f\"; done | sort -u | wc -l" | tr -d ' \r')"
 echo "  -> ${POD_BATCHES} batch file(s) in pod (expected ${BATCH_COUNT})"
 if [[ "$POD_BATCHES" != "$BATCH_COUNT" ]]; then
   echo "Batch file count mismatch; aborting rather than submitting a partial run." >&2
