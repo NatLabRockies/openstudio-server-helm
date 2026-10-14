@@ -75,7 +75,7 @@ spec:
             failureThreshold: 10
           livenessProbe:
             exec:
-              command: ["grep", "-qs", "/mnt/openstudio ",  "/proc/mounts"]
+              command: ["sh", "-c", "grep -qs '/mnt/openstudio ' /proc/mounts && stat /mnt/openstudio/. >/dev/null"]
             initialDelaySeconds: 5
             periodSeconds: 200
             timeoutSeconds: 120
