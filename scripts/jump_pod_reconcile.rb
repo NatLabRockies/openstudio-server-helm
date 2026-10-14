@@ -8,11 +8,12 @@
 #                   to PROJECT_DIR/submitted/ so the rake glob only sees remaining ones
 #   MODE=check      report expected vs created; exit 1 if any batch is missing/empty
 #
-# A batch is matched to an analysis only when its name/display_name contains the
-# project name (bounded by non-alphanumerics) AND "Batch<N>" (N not preceded/followed
-# by a digit or letter). An analysis is only DELETED if the project name is directly
-# followed by the Batch<N> token (so "foo" never deletes "foo-old" analyses), it has
-# 0 data points, is not running, and is older than STUB_MIN_AGE seconds (default 900).
+# A batch is matched to an analysis when its name/display_name contains either:
+#   - the exact batch stem from `parametric_space_<batch_stem>.json` (e.g.
+#     `Batch1000_baseline_testing` -> `Batch1000_baseline_testing_2026_10_13_...`), or
+#   - the project name (bounded by non-alphanumerics) AND "Batch<N>".
+# An analysis is only DELETED if it matches the exact batch stem (or project + Batch<N>),
+# has 0 data points, is not running, and is older than STUB_MIN_AGE seconds (default 900).
 # Any young/running empty analysis aborts reconcile (it may still be populating).
 # Status lookup errors abort the run without deleting anything.
 require 'json'
@@ -55,24 +56,39 @@ def batch_of(f)
   File.basename(f)[/Batch_?(\d+)(?!\d)/i, 1]&.to_i
 end
 
+def batch_stem_of(f)
+  File.basename(f, '.json').sub(/\Aparametric_space_?/i, '')
+end
+
 expected = {}
+expected_stems = {}
 [dir, File.join(dir, 'submitted')].each do |d|
   Dir.glob(File.join(d, 'parametric_space*Batch*.json')).each do |f|
     n = batch_of(f)
-    expected[n] = f if n
+    next unless n
+    expected[n] = f
+    stem = batch_stem_of(f)
+    expected_stems[n] = stem unless stem.empty?
   end
 end
 abort "No parametric_space batch files found in #{dir}" if expected.empty?
 
 analyses = http_json('get', "#{base}/analyses.json") || []
 proj_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}(?![A-Za-z0-9])/
-strict_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}[\s_.:\-]*(?:parametric_space|measure_space)?[\s_.:\-]*Batch_?\d+(?![A-Za-z0-9])/i
+strict_proj_re = /(?<![A-Za-z0-9])#{Regexp.escape(project)}[\s_.:\-]*(?:parametric_space|measure_space)?[\s_.:\-]*Batch_?\d+(?![A-Za-z0-9])/i
 by_batch = Hash.new { |h, k| h[k] = [] }
 analyses.each do |a|
   label = [a['name'], a['display_name']].compact.join(' ')
-  next unless label =~ proj_re
-  n = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?![0-9A-Za-z])/i, 1]
-  by_batch[n.to_i] << [a, label =~ strict_re ? true : false] if n
+  n_str = label[/(?<![A-Za-z0-9])Batch_?(\d+)(?!\d)/i, 1]
+  next unless n_str
+  n = n_str.to_i
+  stem = expected_stems[n]
+  stem_re = stem ? /(?<![A-Za-z0-9])#{Regexp.escape(stem)}(?![A-Za-z0-9])/i : nil
+  matched_stem = stem_re && label =~ stem_re
+  matched_proj = label =~ proj_re && label =~ /(?<![A-Za-z0-9])Batch_?\d+(?![0-9A-Za-z])/i
+  next unless matched_stem || matched_proj
+  strict = matched_stem || (label =~ strict_proj_re)
+  by_batch[n] << [a, strict ? true : false]
 end
 
 done = []

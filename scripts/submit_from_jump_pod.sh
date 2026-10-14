@@ -150,6 +150,22 @@ if [[ -z "$POD" ]]; then
 fi
 echo "=== Using jump pod: ${POD} ==="
 
+# Verify the PVC mount in jump-pod is healthy (not a stale NFS file handle after
+# nfs-server-provisioner pod eviction/restart). If stale, automatically rollout-restart
+# the jump-pod deployment and pick up the fresh pod.
+PVC_CHECK_OUT="$(kubectl exec -n "$NAMESPACE" "$POD" -- ls -d "$PVC_ROOT" 2>&1 || true)"
+if echo "$PVC_CHECK_OUT" | grep -qi "Stale file handle"; then
+  echo "WARNING: ${POD} has a stale NFS file handle on ${PVC_ROOT}; restarting jump-pod deployment..." >&2
+  kubectl rollout restart deployment -n "$NAMESPACE" "$JUMP_POD_LABEL"
+  kubectl rollout status deployment -n "$NAMESPACE" "$JUMP_POD_LABEL" --timeout=180s
+  POD="$(get_jump_pod)"
+  if [[ -z "$POD" ]]; then
+    echo "No running jump-pod found after rollout restart." >&2
+    exit 1
+  fi
+  echo "=== Using restarted jump pod: ${POD} ==="
+fi
+
 # Preflight: confirm jump-pod can actually reach the web service over the
 # cluster pod network *before* spending minutes packing/copying/bundling.
 # On this infrastructure, pod-to-pod overlay connectivity between specific
@@ -404,7 +420,7 @@ end
 
 echo "=== Verifying batch files landed in the pod ==="
 POD_BATCHES="$(retry_kubectl kubectl exec -n "$NAMESPACE" "$POD" -- bash -c \
-  "ls '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/parametric_space*.json 2>/dev/null | wc -l" | tr -d ' \r')"
+  "ls '${REMOTE_ROOT}/outputs/${PROJECT_NAME}'/parametric_space*.json '${REMOTE_ROOT}/outputs/${PROJECT_NAME}/submitted'/parametric_space*.json 2>/dev/null | wc -l" | tr -d ' \r')"
 echo "  -> ${POD_BATCHES} batch file(s) in pod (expected ${BATCH_COUNT})"
 if [[ "$POD_BATCHES" != "$BATCH_COUNT" ]]; then
   echo "Batch file count mismatch; aborting rather than submitting a partial run." >&2
