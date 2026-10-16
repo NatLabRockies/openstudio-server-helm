@@ -16,7 +16,7 @@ If the API endpoint is fronted by a proxy (e.g. Azimuth/OpenStack), it may retur
 - It is not a missing WebSocket/SPDY `Upgrade` header: if it were, every port-forward would fail. `kubectl port-forward` starts with ordinary REST calls that hit the same 502s.
 - Nothing in this chart can fix it; ask the cluster operator to check the apiserver replicas, the proxy's upstream pool, and its `proxy_*_timeout` / `proxy_next_upstream` settings.
 - Mitigation: retry. Scripts use `scripts/lib/retry_cmd.sh`, and the pre-delete hook retries with exponential backoff. Long `helm upgrade` runs make many API calls, so they fail more often; `scripts/upgrade.sh` is the retry-aware path.
-- Do not bypass the pre-delete hook with `--no-hooks` long term: it force-deletes pods stuck on a dead NFS mount and removes PriorityClasses/StorageClass that Helm leaves behind.
+- Do not bypass the pre-delete hook with `--no-hooks` long term: it force-deletes pods stuck on a dead NFS mount and, when `hooks.preDeleteCleanup.deleteClusterResources=true`, removes PriorityClasses/StorageClass that Helm leaves behind.
 
 ## Jump pod cannot reach `web`
 

@@ -128,11 +128,10 @@ hooks:
     # Total Pod budget: image pull + workload deletion + force-delete + settle.
     # No blocking wait (eliminates D-state hang); keep comfortably above settle time.
     activeDeadlineSeconds: 600
-    # When true, the pre-delete hook deletes cluster-scoped PriorityClasses
-    # and StorageClass during uninstall (full cleanup). Set to false if other
-    # releases share them or if you only ever upgrade (deleting them can break
-    # scheduling during failed upgrade/uninstall cycles).
-    deleteClusterResources: true
+    # Cluster-scoped PriorityClasses and StorageClasses can still be required
+    # by a deployed release. Preserve them by default; set true to opt in to
+    # deleting them during uninstall for a disposable, dedicated cluster.
+    deleteClusterResources: false
 
 # Set to google, aws, azure, or openstack
 provider:
@@ -272,6 +271,8 @@ logs:
   archiveRetentionDays: 14
   emptyDirSizeLimit: 4Gi
 
+# Reserve ephemeral storage for the full log volume cap so scheduling accounts
+# for the web pods' bounded-but-real log usage.
 web_background:
   name: "web-background"
   label: "web-background"
@@ -284,7 +285,7 @@ web_background:
       requests:
         cpu: 0.25
         memory: "512Mi"
-        ephemeral-storage: "1Gi"
+        ephemeral-storage: "4Gi"
       limits:
         ephemeral-storage: "8Gi"
 
@@ -306,7 +307,7 @@ web:
       requests:
         cpu: 1
         memory: "2Gi"
-        ephemeral-storage: "1Gi"
+        ephemeral-storage: "4Gi"
       limits:
         ephemeral-storage: "8Gi"
     port:

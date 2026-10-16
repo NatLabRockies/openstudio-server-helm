@@ -32,7 +32,11 @@ Companion writeup: `helm-uninstall-nfs-cleanup-hook-incident.md` (the 2026-08-14
    and the `ssd` StorageClass could survive uninstall when the apiserver's watch
    streams hiccup (repeated `unable to decode an event from the watch stream ...
    INTERNAL_ERROR`), leaving the release stuck `uninstalling` with only those
-   remaining. (Fixed: the hook now deletes them explicitly with `--ignore-not-found`.)
+   remaining. (Fixed: the hook can delete them explicitly with `--ignore-not-found`.
+   `hooks.preDeleteCleanup.deleteClusterResources` now defaults to `false` to avoid
+   deleting cluster-scoped resources that a still-running release may need; set it to
+   `true` only when a dedicated cluster should be fully cleaned up. Existing releases
+   retain their stored value until upgraded.)
 
 ## Step 0 — Confirm the release state
 
@@ -137,8 +141,9 @@ fixes, the hook:
   after retries. It does **not** block on `kubectl wait` for pod termination (that wait
   hung on pods stuck `Terminating` in D-state). The NFS provisioner stays up until the
   hook returns, so client mounts never hit a dead server
-- deletes the chart's PriorityClasses and `ssd` StorageClass deterministically
-  (helm's own cluster-scoped delete can leave them behind on a watch-stream hiccup)
+- when `hooks.preDeleteCleanup.deleteClusterResources=true`, deletes the chart's
+  PriorityClasses and `ssd` StorageClass deterministically (helm's own cluster-scoped
+  delete can leave them behind on a watch-stream hiccup)
 - runs under hook-resource RBAC (SA/Role/RoleBinding + ClusterRole/ClusterRoleBinding
   are `pre-delete` hooks recreated before every run — so a second uninstall works even
   after a first one already deleted them)
