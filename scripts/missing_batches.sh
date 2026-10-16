@@ -56,7 +56,12 @@ d.data_points.aggregate([{\$group:{_id:\"\$analysis_id\",n:{\$sum:1},f:{\$sum:{\
 d.analyses.find({},{name:1}).forEach(a=>{const m=(a.name||\"\").match(/batch_?(\\d+)/i);if(!m)return;const s=c[a._id]||{n:0,f:0};print(m[1],s.n,s.f,a._id)})'")"
 
 # Expected batch numbers and their files, from the pod (project dir + submitted/).
-FILES="$(kubectl exec -n "$NAMESPACE" "$JUMP_POD" -- bash -c "cd '${PROJ_DIR}' && ls parametric_space*Batch*.json submitted/parametric_space*Batch*.json 2>/dev/null")"
+FILES="$(kubectl exec -n "$NAMESPACE" "$JUMP_POD" -- bash -c '
+  for dir in "$1" "$1/submitted"; do
+    [ -d "$dir" ] || continue
+    find "$dir" -maxdepth 1 -type f -name "parametric_space*Batch*.json" -exec basename {} \;
+  done
+' _ "$PROJ_DIR")"
 
 export SERVER FILES FAIL_THRESHOLD
 REPORT="$(ruby -e '
