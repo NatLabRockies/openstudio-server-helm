@@ -201,15 +201,9 @@ for attempt in $(seq 1 "$PREFLIGHT_MAX_ATTEMPTS"); do
   # (e.g. 28 on connection timeout) into this assignment, which would
   # otherwise abort the whole script on the very first failed attempt
   # instead of actually retrying -- "|| true" keeps that from happening.
-  # Test a lightweight JSON API endpoint (/projects.json), NOT the root
-  # path ("/"). The root path renders a full dashboard page and can take
-  # 8+ seconds under load, far exceeding what looked like a generous
-  # timeout and producing false "unreachable" failures even while the
-  # server was actively, successfully serving other clients the entire
-  # time (confirmed live: /projects.json succeeded in ~8s while "/" kept
-  # timing out at both 5s and 10s). --max-time is generous (20s) since the
-  # app can be genuinely this slow under real load, not just unreachable.
-  CODE="$(kubectl exec -n "$NAMESPACE" "$POD" -- curl -s -o /dev/null --max-time 20 -w "%{http_code}" "${IN_CLUSTER_SERVER_URI}/projects.json" 2>/dev/null || true)"
+  # Use /status.json, not "/" or /projects.json: both render pages that grow
+  # with the number of projects and time out on a busy server.
+  CODE="$(kubectl exec -n "$NAMESPACE" "$POD" -- curl -s -o /dev/null --max-time 60 -w "%{http_code}" "${IN_CLUSTER_SERVER_URI}/status.json" 2>/dev/null || true)"
   # curl prints "000" (not a real status line) when the connection itself
   # times out/refuses/fails -- that must NOT count as success, even though
   # it's numeric. Any genuine HTTP response (even a 4xx/5xx from the app)
